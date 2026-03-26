@@ -19,6 +19,5 @@ beforeEach(async () => {
   await pool.query('TRUNCATE TABLE users RESTART IDENTITY CASCADE');
 });
 
-afterAll(async () => {
-  await pool.end();
-});
+// Do not call pool.end() here — the pool is shared across all test files
+// in the same process (runInBand) and ending it would break subsequent files.

@@ -106,25 +106,35 @@ describe('Chess Engine', () => {
       expect(result.valid).toBe(false);
     });
 
-    test('Cannot move opponent pieces', () => {
-      const result = applyMove(boardToFen(INITIAL_BOARD), 'e7', 'e5');
+    test('Pawn cannot move backwards', () => {
+      const fen = boardToFen([
+        ['bR','bN','bB','bQ','bK','bB','bN','bR'],
+        ['bP','bP','bP','bP','bP','bP','bP','bP'],
+        [null,null,null,null,null,null,null,null],
+        [null,null,null,null,null,null,null,null],
+        [null,null,null,null,'wP',null,null,null],
+        [null,null,null,null,null,null,null,null],
+        ['wP','wP','wP','wP',null,'wP','wP','wP'],
+        ['wR','wN','wB','wQ','wK','wB','wN','wR'],
+      ]);
+      const result = applyMove(fen, 'e4', 'e3');
       expect(result.valid).toBe(false);
       expect(result.error).toBe('Illegal move');
     });
 
     test('Cannot move piece into check', () => {
-      // Construct a position where king would be in check if piece moves
+      // wR at e4 is pinned to wK at e1 by bR at e8 — moving off the e-file is illegal
       const fen = boardToFen([
-        [null,null,null,null,'bK',null,null,null],
+        [null,null,null,null,'bR',null,null,null],
         [null,null,null,null,null,null,null,null],
         [null,null,null,null,null,null,null,null],
-        [null,null,null,'bR',null,null,null,null],
-        [null,null,null,'wR',null,'wP',null,null],
+        [null,null,null,null,null,null,null,null],
+        [null,null,null,null,'wR',null,null,null],
         [null,null,null,null,null,null,null,null],
         [null,null,null,null,null,null,null,null],
         [null,null,null,null,'wK',null,null,null],
       ]);
-      const result = applyMove(fen, 'f4', 'f5');
+      const result = applyMove(fen, 'e4', 'd4');
       expect(result.valid).toBe(false);
     });
 
@@ -136,12 +146,13 @@ describe('Chess Engine', () => {
 
   describe('Captures', () => {
     test('Pawn captures diagonally', () => {
+      // wP at d4 (row 4, col 3), bP at e5 (row 3, col 4)
       const fen = boardToFen([
         ['bR','bN','bB','bQ','bK','bB','bN','bR'],
         ['bP','bP','bP','bP',null,'bP','bP','bP'],
+        [null,null,null,null,null,null,null,null],
         [null,null,null,null,'bP',null,null,null],
         [null,null,null,'wP',null,null,null,null],
-        [null,null,null,null,null,null,null,null],
         [null,null,null,null,null,null,null,null],
         ['wP','wP','wP',null,'wP','wP','wP','wP'],
         ['wR','wN','wB','wQ','wK','wB','wN','wR'],
@@ -152,12 +163,13 @@ describe('Chess Engine', () => {
     });
 
     test('Captured piece shows in notation', () => {
+      // wP at d4 (row 4, col 3), bP at e5 (row 3, col 4)
       const fen = boardToFen([
         ['bR','bN','bB','bQ','bK','bB','bN','bR'],
         ['bP','bP','bP','bP',null,'bP','bP','bP'],
+        [null,null,null,null,null,null,null,null],
         [null,null,null,null,'bP',null,null,null],
         [null,null,null,'wP',null,null,null,null],
-        [null,null,null,null,null,null,null,null],
         [null,null,null,null,null,null,null,null],
         ['wP','wP','wP',null,'wP','wP','wP','wP'],
         ['wR','wN','wB','wQ','wK','wB','wN','wR'],
@@ -173,36 +185,36 @@ describe('Chess Engine', () => {
       expect(result.gameStatus).toBe('active');
     });
 
-    test('Checkmate detection (Scholar\'s Mate)', () => {
-      // Setup Scholar's Mate position
+    test('Checkmate detection', () => {
+      // bK at a8, wQ at b6, wK at c7; wQ moves b6→b8 = checkmate
       const fen = boardToFen([
-        ['bR','bN','bB',null,'bK','bB','bN','bR'],
-        ['bP','bP','bP','bQ','bP','bP','bP','bP'],
+        ['bK',null,null,null,null,null,null,null],
+        [null,null,'wK',null,null,null,null,null],
+        [null,'wQ',null,null,null,null,null,null],
         [null,null,null,null,null,null,null,null],
         [null,null,null,null,null,null,null,null],
-        [null,null,null,'wB',null,'wP',null,null],
         [null,null,null,null,null,null,null,null],
-        ['wP','wP','wP','wQ','wP',null,'wP','wP'],
-        ['wR','wN',null,null,'wK',null,'wN','wR'],
+        [null,null,null,null,null,null,null,null],
+        [null,null,null,null,null,null,null,null],
       ]);
-      const result = applyMove(fen, 'f4', 'f7');
+      const result = applyMove(fen, 'b6', 'b8');
       expect(result.gameStatus).toBe('checkmate');
       expect(result.winnerId).toBe('white');
     });
 
     test('Stalemate detection', () => {
-      // Black king on a7, surrounded but not in check
+      // bK at a8, wK at c6, wQ at h7; wQ moves h7→c7 = stalemate
       const fen = boardToFen([
-        [null,null,null,null,null,null,null,null],
-        ['bK',null,'wQ',null,null,null,null,null],
-        ['wP',null,null,null,null,null,null,null],
-        [null,null,null,null,null,null,null,null],
-        [null,null,null,null,null,null,null,null],
+        ['bK',null,null,null,null,null,null,null],
+        [null,null,null,null,null,null,null,'wQ'],
+        [null,null,'wK',null,null,null,null,null],
         [null,null,null,null,null,null,null,null],
         [null,null,null,null,null,null,null,null],
-        [null,null,null,null,'wK',null,null,null],
+        [null,null,null,null,null,null,null,null],
+        [null,null,null,null,null,null,null,null],
+        [null,null,null,null,null,null,null,null],
       ]);
-      const result = applyMove(fen, 'c6', 'a6');
+      const result = applyMove(fen, 'h7', 'c7');
       expect(result.gameStatus).toBe('stalemate');
     });
   });
@@ -258,11 +270,12 @@ describe('Chess Engine', () => {
 
   describe('Check Detection', () => {
     test('King in check is detected', () => {
+      // wR at e5 attacks bK at e8 along the e-file
       const fen = boardToFen([
         [null,null,null,null,'bK',null,null,null],
         [null,null,null,null,null,null,null,null],
-        [null,null,null,'wR',null,null,null,null],
         [null,null,null,null,null,null,null,null],
+        [null,null,null,null,'wR',null,null,null],
         [null,null,null,null,null,null,null,null],
         [null,null,null,null,null,null,null,null],
         [null,null,null,null,null,null,null,null],
@@ -288,17 +301,18 @@ describe('Chess Engine', () => {
     });
 
     test('Checkmate produces # symbol', () => {
+      // Same back-rank mate: bK at a8, wQ at b6, wK at c7
       const fen = boardToFen([
-        ['bR','bN','bB',null,'bK','bB','bN','bR'],
-        ['bP','bP','bP','bQ','bP','bP','bP','bP'],
+        ['bK',null,null,null,null,null,null,null],
+        [null,null,'wK',null,null,null,null,null],
+        [null,'wQ',null,null,null,null,null,null],
         [null,null,null,null,null,null,null,null],
         [null,null,null,null,null,null,null,null],
-        [null,null,null,'wB',null,'wP',null,null],
         [null,null,null,null,null,null,null,null],
-        ['wP','wP','wP','wQ','wP',null,'wP','wP'],
-        ['wR','wN',null,null,'wK',null,'wN','wR'],
+        [null,null,null,null,null,null,null,null],
+        [null,null,null,null,null,null,null,null],
       ]);
-      const result = applyMove(fen, 'f4', 'f7');
+      const result = applyMove(fen, 'b6', 'b8');
       expect(result.notation).toContain('#');
     });
   });

@@ -6,10 +6,10 @@
     "dev": "nodemon server/index.js",
     "build:client": "cd client && npm install && npm run build",
     "setup": "npm install && npm run build:client",
-    "test": "jest --forceExit",
-    "test:unit": "jest tests/unit --forceExit",
-    "test:integration": "jest tests/integration --forceExit",
-    "test:coverage": "jest --coverage --forceExit"
+    "test": "jest --runInBand --forceExit",
+    "test:unit": "jest tests/unit --runInBand --forceExit",
+    "test:integration": "jest tests/integration --runInBand --forceExit",
+    "test:coverage": "jest --runInBand --coverage --forceExit"
   },
   "dependencies": {
     "bcrypt": "^6.0.0",

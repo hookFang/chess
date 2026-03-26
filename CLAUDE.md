@@ -2,6 +2,10 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Workflow Rules
+
+**Never commit or push code.** The developer reviews all changes manually and handles all git commits and pushes themselves.
+
 ## Commands
 
 ### Development

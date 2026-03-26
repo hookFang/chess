@@ -100,7 +100,7 @@ describe('Rooms API', () => {
 
     test('Returns 404 for non-existent room', async () => {
       const res = await request(app)
-        .get(`/api/rooms/nonexistent`)
+        .get(`/api/rooms/00000000-0000-0000-0000-000000000000`)
         .set('Authorization', `Bearer ${whiteToken}`);
 
       expect(res.status).toBe(404);
@@ -182,7 +182,7 @@ describe('Rooms API', () => {
 
     test('Returns 404 for non-existent room', async () => {
       const res = await request(app)
-        .post(`/api/rooms/nonexistent/join`)
+        .post(`/api/rooms/00000000-0000-0000-0000-000000000000/join`)
         .set('Authorization', `Bearer ${blackToken}`);
 
       expect(res.status).toBe(404);

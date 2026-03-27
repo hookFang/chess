@@ -36,6 +36,11 @@ jobs:
       - name: Install dependencies
         run: npm install
 
+      - name: Create test database
+        env:
+          PGPASSWORD: chesspass
+        run: psql -h localhost -U chess -d postgres -c "CREATE DATABASE chessdb_test;"
+
       - name: Run backend tests
         env:
           NODE_ENV: test
@@ -113,6 +118,11 @@ jobs:
 
       - name: Install Playwright browsers
         run: cd client && npx playwright install --with-deps
+
+      - name: Create test database
+        env:
+          PGPASSWORD: chesspass
+        run: psql -h localhost -U chess -d postgres -c "CREATE DATABASE chessdb_test;"
 
       - name: Build client
         run: npm run build:client

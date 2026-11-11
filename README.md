@@ -98,9 +98,8 @@ Restore by extracting the archive into a fresh `chess-data` volume the same way.
 ```bash
 docker login                                   # once
 
-docker build -t hookfang/chess:latest -t hookfang/chess:1.0.0 .
+docker build -t hookfang/chess:latest .
 docker push hookfang/chess:latest
-docker push hookfang/chess:1.0.0
 ```
 
 Replace `hookfang` with your Docker Hub username (and update the `image:` line in
@@ -117,8 +116,7 @@ Other registries: tag with the registry host, e.g. `ghcr.io/<user>/chess:latest`
 ### Automatically (GitHub Actions)
 
 `.github/workflows/ci.yml` runs the tests and, on pushes to `main`/`master`,
-builds and pushes `<DOCKERHUB_USERNAME>/chess` with tags `latest`, the branch
-name, `sha-<commit>` and `run-<number>`. Setup (Docker Hub access token and
+builds and pushes `<DOCKERHUB_USERNAME>/chess:latest`. Setup (Docker Hub access token and
 the `DOCKERHUB_USERNAME` / `DOCKERHUB_TOKEN` repository secrets) is described in
 [GITHUB_ACTIONS_SETUP.md](GITHUB_ACTIONS_SETUP.md).
 

@@ -23,11 +23,7 @@ The workflow in `.github/workflows/ci.yml` runs the tests and publishes the Dock
 - **Backend tests**: Jest unit + integration tests against a Postgres service container.
 - **Frontend tests**: React Testing Library tests for the client.
 - **E2E**: Playwright with two real browsers (game creation, joining, moves, castling).
-- **Docker**: builds the single image (server + embedded PostgreSQL) and pushes `<DOCKERHUB_USERNAME>/chess` with these tags:
-  - `latest` – newest build of the default branch
-  - `main` / `master` – branch name
-  - `sha-<short-sha>` – a specific commit
-  - `run-<number>` – the workflow run, handy for rollbacks
+- **Docker**: builds the single image (server + embedded PostgreSQL + nginx) and pushes it to Docker Hub as `<DOCKERHUB_USERNAME>/chess:latest` (the only tag published; each build replaces the previous `latest`).
 
 Skip a run by putting `[skip ci]` in the commit message.
 

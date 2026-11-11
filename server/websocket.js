@@ -1,11 +1,27 @@
 const { WebSocketServer } = require('ws');
 const { URL } = require('url');
 const { pool } = require('./db');
-const { wsAuth } = require('./auth');
 const { applyMove } = require('./chess');
+const { sendPushToPlayer } = require('./push');
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+const other = (color) => (color === 'white' ? 'black' : 'white');
+const cap = (color) => color.charAt(0).toUpperCase() + color.slice(1);
+
+function roomCastlingRights(room) {
+  return {
+    whiteKingMoved: room.white_king_moved,
+    blackKingMoved: room.black_king_moved,
+    whiteRookAMoved: room.white_rook_a_moved,
+    whiteRookHMoved: room.white_rook_h_moved,
+    blackRookAMoved: room.black_rook_a_moved,
+    blackRookHMoved: room.black_rook_h_moved,
+  };
+}
 
 // In-memory map: roomId -> Set<clientInfo>
-// clientInfo = { ws, userId, username, color }
+// clientInfo = { ws, color }  (color: 'white' | 'black' | 'spectator')
 const rooms = new Map();
 
 function getRoomClients(roomId) {
@@ -36,28 +52,18 @@ function setupWebSocket(server) {
   const wss = new WebSocketServer({ server, path: '/ws' });
 
   wss.on('connection', async (ws, req) => {
-    let roomId, userId, username, color;
+    let roomId, color;
 
     try {
       const url = new URL(req.url, 'http://localhost');
-      const token = url.searchParams.get('token');
       roomId = url.searchParams.get('room');
+      const token = url.searchParams.get('token'); // optional: absent for spectators
 
-      if (!token || !roomId) {
-        ws.close(4001, 'Missing token or room');
+      if (!roomId || !UUID_RE.test(roomId)) {
+        ws.close(4004, 'Room not found');
         return;
       }
 
-      const payload = wsAuth(token);
-      if (!payload) {
-        ws.close(4001, 'Invalid token');
-        return;
-      }
-
-      userId = payload.id;
-      username = payload.username;
-
-      // Look up room to determine color
       const roomResult = await pool.query('SELECT * FROM rooms WHERE id = $1', [roomId]);
       if (!roomResult.rows[0]) {
         ws.close(4004, 'Room not found');
@@ -65,24 +71,21 @@ function setupWebSocket(server) {
       }
       const room = roomResult.rows[0];
 
-      if (room.white_player_id === userId) color = 'white';
-      else if (room.black_player_id === userId) color = 'black';
+      if (token && room.white_token === token) color = 'white';
+      else if (token && room.black_token === token) color = 'black';
       else color = 'spectator';
 
-      const clientInfo = { ws, userId, username, color };
+      const clientInfo = { ws, color };
       getRoomClients(roomId).add(clientInfo);
 
       sendTo(ws, {
         type: 'connected',
-        userId,
-        username,
         color,
         roomStatus: room.status,
+        castlingRights: roomCastlingRights(room),
       });
 
-      // Notify others
-      const players = getPlayersInfo(roomId);
-      broadcast(roomId, { type: 'player_joined', username, color, players }, ws);
+      broadcast(roomId, { type: 'player_joined', color, players: getPlayersInfo(roomId) }, ws);
 
       ws.on('message', async (raw) => {
         let msg;
@@ -94,13 +97,13 @@ function setupWebSocket(server) {
         }
 
         if (msg.type === 'move') {
-          await handleMove(ws, roomId, userId, username, color, msg);
+          await handleMove(ws, roomId, color, msg);
         } else if (msg.type === 'resign') {
-          await handleResign(ws, roomId, userId, username, color);
+          await handleResign(roomId, color);
         } else if (msg.type === 'offer_draw') {
-          broadcast(roomId, { type: 'draw_offered', from: username }, ws);
+          if (color !== 'spectator') broadcast(roomId, { type: 'draw_offered', from: color }, ws);
         } else if (msg.type === 'accept_draw') {
-          await handleAcceptDraw(roomId);
+          await handleAcceptDraw(roomId, color);
         }
       });
 
@@ -111,7 +114,7 @@ function setupWebSocket(server) {
           if (clients.size === 0) {
             rooms.delete(roomId);
           } else {
-            broadcast(roomId, { type: 'player_left', username, color });
+            broadcast(roomId, { type: 'player_left', color });
           }
         }
       });
@@ -126,10 +129,10 @@ function setupWebSocket(server) {
 function getPlayersInfo(roomId) {
   const clients = rooms.get(roomId);
   if (!clients) return [];
-  return [...clients].map(c => ({ username: c.username, color: c.color }));
+  return [...clients].map(c => ({ color: c.color }));
 }
 
-async function handleMove(ws, roomId, userId, username, color, msg) {
+async function handleMove(ws, roomId, color, msg) {
   if (color === 'spectator') {
     sendTo(ws, { type: 'error', message: 'Spectators cannot move' });
     return;
@@ -162,43 +165,49 @@ async function handleMove(ws, roomId, userId, username, color, msg) {
       return;
     }
 
-    const result = applyMove(room.board_state, msg.from, msg.to, msg.promotion);
+    const result = applyMove(room.board_state, msg.from, msg.to, msg.promotion, roomCastlingRights(room));
     if (!result.valid) {
       await client.query('ROLLBACK');
       sendTo(ws, { type: 'error', message: result.error || 'Illegal move' });
       return;
     }
 
-    // Count moves for move number
     const moveCountResult = await client.query(
       'SELECT COUNT(*) FROM moves WHERE room_id = $1',
       [roomId]
     );
     const moveNumber = parseInt(moveCountResult.rows[0].count) + 1;
 
-    // Save move
     await client.query(
-      `INSERT INTO moves (room_id, player_id, from_square, to_square, piece, captured, promotion, move_notation, board_state, move_number)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
-      [roomId, userId, msg.from, msg.to, msg.piece, result.captured, result.promotion, result.notation, result.newBoard, moveNumber]
+      `INSERT INTO moves (room_id, from_square, to_square, piece, captured, promotion, move_notation, board_state, move_number)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+      [roomId, msg.from, msg.to, msg.piece, result.captured, result.promotion, result.notation, result.newBoard, moveNumber]
     );
 
-    // Determine next turn and room status
-    const nextTurn = color === 'white' ? 'black' : 'white';
+    const nextTurn = other(color);
     let newStatus = 'active';
-    let winnerId = null;
+    let winner = null;
 
     if (result.gameStatus === 'checkmate') {
       newStatus = 'finished';
-      winnerId = result.winnerId === 'white' ? room.white_player_id : room.black_player_id;
+      winner = result.winnerId; // engine returns 'white' | 'black'
     } else if (result.gameStatus === 'stalemate') {
       newStatus = 'finished';
     }
 
+    const rights = result.newCastlingRights;
+
     await client.query(
-      `UPDATE rooms SET board_state = $1, current_turn = $2, status = $3, winner_id = $4, updated_at = NOW()
-       WHERE id = $5`,
-      [result.newBoard, nextTurn, newStatus, winnerId, roomId]
+      `UPDATE rooms SET board_state = $1, current_turn = $2, status = $3, winner = $4, updated_at = NOW(),
+              white_king_moved = $5, black_king_moved = $6,
+              white_rook_a_moved = $7, white_rook_h_moved = $8,
+              black_rook_a_moved = $9, black_rook_h_moved = $10
+       WHERE id = $11`,
+      [result.newBoard, nextTurn, newStatus, winner,
+       rights.whiteKingMoved, rights.blackKingMoved,
+       rights.whiteRookAMoved, rights.whiteRookHMoved,
+       rights.blackRookAMoved, rights.blackRookHMoved,
+       roomId]
     );
 
     await client.query('COMMIT');
@@ -216,16 +225,28 @@ async function handleMove(ws, roomId, userId, username, color, msg) {
       nextTurn,
       gameStatus: result.gameStatus,
       inCheck: result.inCheck,
-      winnerId,
+      winnerColor: winner,
+      isCastle: result.isCastle,
+      castlingRights: rights,
     });
 
     if (newStatus === 'finished') {
       broadcastAll(roomId, {
         type: 'game_over',
         status: result.gameStatus,
-        winnerId,
-        winnerColor: result.winnerId || null,
+        winnerColor: winner,
       });
+    }
+
+    // Web push to the opponent (fire-and-forget, regardless of live WS connection)
+    const url = `/game/${roomId}`;
+    if (newStatus === 'finished') {
+      const body = result.gameStatus === 'checkmate'
+        ? `${cap(color)} checkmated you (${result.notation})`
+        : `Game drawn by stalemate (${result.notation})`;
+      sendPushToPlayer(roomId, nextTurn, { title: 'Game over', body, url });
+    } else {
+      sendPushToPlayer(roomId, nextTurn, { title: `${cap(color)} moved`, body: result.notation, url });
     }
 
   } catch (err) {
@@ -237,7 +258,7 @@ async function handleMove(ws, roomId, userId, username, color, msg) {
   }
 }
 
-async function handleResign(ws, roomId, userId, username, color) {
+async function handleResign(roomId, color) {
   if (color === 'spectator') return;
 
   const client = await pool.connect();
@@ -250,20 +271,21 @@ async function handleResign(ws, roomId, userId, username, color) {
       return;
     }
 
-    const winnerId = color === 'white' ? room.black_player_id : room.white_player_id;
+    const winner = other(color);
     await client.query(
-      `UPDATE rooms SET status = 'finished', winner_id = $1, updated_at = NOW() WHERE id = $2`,
-      [winnerId, roomId]
+      `UPDATE rooms SET status = 'finished', winner = $1, updated_at = NOW() WHERE id = $2`,
+      [winner, roomId]
     );
     await client.query('COMMIT');
 
     broadcastAll(roomId, {
       type: 'game_over',
       status: 'resignation',
-      winnerId,
-      winnerColor: color === 'white' ? 'black' : 'white',
-      resignedBy: username,
+      winnerColor: winner,
+      resignedBy: color,
     });
+
+    sendPushToPlayer(roomId, winner, { title: 'Game over', body: `${cap(color)} resigned. You win!`, url: `/game/${roomId}` });
   } catch (err) {
     await client.query('ROLLBACK').catch(() => {});
     console.error('handleResign error:', err);
@@ -272,21 +294,27 @@ async function handleResign(ws, roomId, userId, username, color) {
   }
 }
 
-async function handleAcceptDraw(roomId) {
+async function handleAcceptDraw(roomId, color) {
+  if (color === 'spectator') return;
+
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    await client.query(
-      `UPDATE rooms SET status = 'finished', winner_id = NULL, updated_at = NOW() WHERE id = $1`,
+    const updated = await client.query(
+      `UPDATE rooms SET status = 'finished', winner = NULL, updated_at = NOW()
+       WHERE id = $1 AND status = 'active' RETURNING id`,
       [roomId]
     );
     await client.query('COMMIT');
+    if (updated.rowCount === 0) return;
 
     broadcastAll(roomId, {
       type: 'game_over',
       status: 'draw',
-      winnerId: null,
+      winnerColor: null,
     });
+
+    sendPushToPlayer(roomId, other(color), { title: 'Game over', body: `${cap(color)} accepted the draw`, url: `/game/${roomId}` });
   } catch (err) {
     await client.query('ROLLBACK').catch(() => {});
     console.error('handleAcceptDraw error:', err);

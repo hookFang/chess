@@ -67,7 +67,6 @@ function findKing(board, color) {
 
 function isSquareAttackedBy(board, r, c, attackerColor) {
   const ec = attackerColor;
-  const dc = ec === 'w' ? 'b' : 'w';
 
   // Pawn attacks
   const pawnDir = ec === 'w' ? 1 : -1; // white pawns attack upward (decreasing row)
@@ -126,7 +125,7 @@ function isInCheck(board, color) {
 }
 
 // Get raw candidate moves (no check filtering)
-function getRawMoves(board, r, c) {
+function getRawMoves(board, r, c, castlingRights = {}) {
   const piece = board[r][c];
   if (!piece) return [];
   const color = pieceColor(piece);
@@ -202,18 +201,42 @@ function getRawMoves(board, r, c) {
         moves.push([nr, nc]);
       }
     }
+
+    // Castling (pseudo-legal here; check/attacked-square safety is enforced in getLegalMovesRC)
+    const kingMoved = color === 'w' ? castlingRights.whiteKingMoved : castlingRights.blackKingMoved;
+    const rookAMoved = color === 'w' ? castlingRights.whiteRookAMoved : castlingRights.blackRookAMoved;
+    const rookHMoved = color === 'w' ? castlingRights.whiteRookHMoved : castlingRights.blackRookHMoved;
+    if (!kingMoved) {
+      if (!rookHMoved && board[r][7] === color + 'R' && !board[r][5] && !board[r][6]) {
+        moves.push([r, c + 2]);
+      }
+      if (!rookAMoved && board[r][0] === color + 'R' && !board[r][1] && !board[r][2] && !board[r][3]) {
+        moves.push([r, c - 2]);
+      }
+    }
   }
 
   return moves;
 }
 
 // Get legal moves (filtered for self-check)
-function getLegalMovesRC(board, r, c) {
+function getLegalMovesRC(board, r, c, castlingRights = {}) {
   const piece = board[r][c];
   if (!piece) return [];
   const color = pieceColor(piece);
-  const raw = getRawMoves(board, r, c);
+  const type = pieceType(piece);
+  const oppColor = color === 'w' ? 'b' : 'w';
+  const raw = getRawMoves(board, r, c, castlingRights);
   return raw.filter(([tr, tc]) => {
+    if (type === 'K' && Math.abs(tc - c) === 2) {
+      // Castling: king must not be in check, and must not pass through or land on an attacked square.
+      // (The generic clone-and-check filter below only moves the king, so it can't see the pass-through square.)
+      if (isInCheck(board, color)) return false;
+      const midCol = tc > c ? c + 1 : c - 1;
+      if (isSquareAttackedBy(board, r, midCol, oppColor)) return false;
+      if (isSquareAttackedBy(board, r, tc, oppColor)) return false;
+      return true;
+    }
     const nb = cloneBoard(board);
     nb[tr][tc] = piece;
     nb[r][c] = null;
@@ -221,23 +244,27 @@ function getLegalMovesRC(board, r, c) {
   });
 }
 
-function hasAnyLegalMove(board, color) {
+function hasAnyLegalMove(board, color, castlingRights = {}) {
   for (let r = 0; r < 8; r++) {
     for (let c = 0; c < 8; c++) {
       if (pieceColor(board[r][c]) === color) {
-        if (getLegalMovesRC(board, r, c).length > 0) return true;
+        if (getLegalMovesRC(board, r, c, castlingRights).length > 0) return true;
       }
     }
   }
   return false;
 }
 
-function buildNotation(board, fromR, fromC, toR, toC, piece, captured, promotionPiece, inCheckAfter, isCheckmate) {
+function buildNotation(board, fromR, fromC, toR, toC, piece, captured, promotionPiece, inCheckAfter, isCheckmate, isCastle) {
   const type = pieceType(piece);
   const toSq = rcToSquare(toR, toC);
   let notation = '';
 
-  if (type === 'K') {
+  if (isCastle === 'kingside') {
+    notation = 'O-O';
+  } else if (isCastle === 'queenside') {
+    notation = 'O-O-O';
+  } else if (type === 'K') {
     notation = 'K' + (captured ? 'x' : '') + toSq;
   } else if (type === 'Q') {
     notation = 'Q' + (captured ? 'x' : '') + toSq;
@@ -263,10 +290,50 @@ function buildNotation(board, fromR, fromC, toR, toC, piece, captured, promotion
   return notation;
 }
 
-function applyMove(boardState, fromSq, toSq, promotion) {
+const CASTLING_FIELDS = [
+  'whiteKingMoved', 'blackKingMoved',
+  'whiteRookAMoved', 'whiteRookHMoved',
+  'blackRookAMoved', 'blackRookHMoved',
+];
+
+function normalizeCastlingRights(rights) {
+  const r = rights || {};
+  const out = {};
+  for (const f of CASTLING_FIELDS) out[f] = !!r[f];
+  return out;
+}
+
+// A king move, a rook move from its home square, or capturing an opponent's
+// still-unmoved rook on its home square all permanently revoke the relevant right.
+function updateCastlingRights(rights, color, fr, fc, tr, tc, type, captured) {
+  const next = { ...rights };
+
+  if (type === 'K') {
+    if (color === 'w') next.whiteKingMoved = true;
+    else next.blackKingMoved = true;
+  }
+  if (type === 'R') {
+    if (color === 'w' && fr === 7 && fc === 0) next.whiteRookAMoved = true;
+    if (color === 'w' && fr === 7 && fc === 7) next.whiteRookHMoved = true;
+    if (color === 'b' && fr === 0 && fc === 0) next.blackRookAMoved = true;
+    if (color === 'b' && fr === 0 && fc === 7) next.blackRookHMoved = true;
+  }
+  if (captured && pieceType(captured) === 'R') {
+    const capColor = pieceColor(captured);
+    if (capColor === 'w' && tr === 7 && tc === 0) next.whiteRookAMoved = true;
+    if (capColor === 'w' && tr === 7 && tc === 7) next.whiteRookHMoved = true;
+    if (capColor === 'b' && tr === 0 && tc === 0) next.blackRookAMoved = true;
+    if (capColor === 'b' && tr === 0 && tc === 7) next.blackRookHMoved = true;
+  }
+
+  return next;
+}
+
+function applyMove(boardState, fromSq, toSq, promotion, castlingRights) {
   const board = boardFromFen(boardState);
   const [fr, fc] = squareToRC(fromSq);
   const [tr, tc] = squareToRC(toSq);
+  const rights = normalizeCastlingRights(castlingRights);
 
   const piece = board[fr][fc];
   if (!piece) return { valid: false, error: 'No piece at source square' };
@@ -275,14 +342,26 @@ function applyMove(boardState, fromSq, toSq, promotion) {
   const type = pieceType(piece);
   const oppColor = color === 'w' ? 'b' : 'w';
 
-  const legalMoves = getLegalMovesRC(board, fr, fc);
+  const legalMoves = getLegalMovesRC(board, fr, fc, rights);
   const isLegal = legalMoves.some(([r, c]) => r === tr && c === tc);
   if (!isLegal) return { valid: false, error: 'Illegal move' };
+
+  const isCastle = (type === 'K' && Math.abs(tc - fc) === 2)
+    ? (tc > fc ? 'kingside' : 'queenside')
+    : null;
 
   const newBoard = cloneBoard(board);
   const captured = newBoard[tr][tc];
   newBoard[tr][tc] = piece;
   newBoard[fr][fc] = null;
+
+  if (isCastle === 'kingside') {
+    newBoard[fr][5] = newBoard[fr][7];
+    newBoard[fr][7] = null;
+  } else if (isCastle === 'queenside') {
+    newBoard[fr][3] = newBoard[fr][0];
+    newBoard[fr][0] = null;
+  }
 
   // Pawn promotion
   let promotionPiece = null;
@@ -294,9 +373,11 @@ function applyMove(boardState, fromSq, toSq, promotion) {
     }
   }
 
+  const newCastlingRights = updateCastlingRights(rights, color, fr, fc, tr, tc, type, captured);
+
   // Check game status for the opponent
   const oppInCheck = isInCheck(newBoard, oppColor);
-  const oppHasMoves = hasAnyLegalMove(newBoard, oppColor);
+  const oppHasMoves = hasAnyLegalMove(newBoard, oppColor, newCastlingRights);
 
   let gameStatus = 'active';
   let winnerColor = null;
@@ -312,7 +393,7 @@ function applyMove(boardState, fromSq, toSq, promotion) {
     }
   }
 
-  const notation = buildNotation(board, fr, fc, tr, tc, piece, captured, promotionPiece, oppInCheck, isCheckmate);
+  const notation = buildNotation(board, fr, fc, tr, tc, piece, captured, promotionPiece, oppInCheck, isCheckmate, isCastle);
 
   return {
     valid: true,
@@ -323,6 +404,8 @@ function applyMove(boardState, fromSq, toSq, promotion) {
     gameStatus,
     winnerId: winnerColor, // caller maps color to player id
     inCheck: oppInCheck,
+    isCastle,
+    newCastlingRights,
   };
 }
 

@@ -1,125 +1,61 @@
+const crypto = require('crypto');
 const express = require('express');
-const bcrypt = require('bcrypt');
 const { pool } = require('./db');
-const { signToken, authMiddleware } = require('./auth');
 const { boardToFen, INITIAL_BOARD } = require('./chess');
 
 const router = express.Router();
 
-// POST /api/auth/register
-router.post('/auth/register', async (req, res) => {
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function newToken() {
+  return crypto.randomUUID();
+}
+
+// Which side does this token belong to? 'white' | 'black' | null (spectator)
+function colorForToken(room, token) {
+  if (!token) return null;
+  if (room.white_token && room.white_token === token) return 'white';
+  if (room.black_token && room.black_token === token) return 'black';
+  return null;
+}
+
+function castlingRightsOf(room) {
+  return {
+    whiteKingMoved: room.white_king_moved,
+    blackKingMoved: room.black_king_moved,
+    whiteRookAMoved: room.white_rook_a_moved,
+    whiteRookHMoved: room.white_rook_h_moved,
+    blackRookAMoved: room.black_rook_a_moved,
+    blackRookHMoved: room.black_rook_h_moved,
+  };
+}
+
+async function findRoom(id) {
+  if (!UUID_RE.test(id)) return null;
+  const result = await pool.query('SELECT * FROM rooms WHERE id = $1', [id]);
+  return result.rows[0] || null;
+}
+
+const playerToken = (req) => req.get('x-player-token') || null;
+
+// POST /api/rooms — create a game. Body { color: 'white' | 'black' | 'random' } (default random)
+// picks the creator's side; the person who opens the link gets the other one.
+router.post('/rooms', async (req, res) => {
   try {
-    const { username, password } = req.body;
-    if (!username || username.length < 3 || username.length > 50) {
-      return res.status(400).json({ error: 'Username must be 3-50 characters' });
+    const choice = (req.body || {}).color || 'random';
+    if (!['white', 'black', 'random'].includes(choice)) {
+      return res.status(400).json({ error: 'color must be white, black or random' });
     }
-    if (!password || password.length < 6) {
-      return res.status(400).json({ error: 'Password must be at least 6 characters' });
-    }
-
-    const lowerUsername = username.toLowerCase();
-    const passwordHash = await bcrypt.hash(password, 12);
-
+    const color = choice === 'random' ? (crypto.randomInt(2) === 0 ? 'white' : 'black') : choice;
+    const token = newToken();
     const result = await pool.query(
-      'INSERT INTO users (username, password_hash) VALUES ($1, $2) RETURNING id, username',
-      [lowerUsername, passwordHash]
-    );
-
-    const user = result.rows[0];
-    const token = signToken({ id: user.id, username: user.username });
-    res.json({ token, user: { id: user.id, username: user.username } });
-  } catch (err) {
-    if (err.code === '23505') {
-      return res.status(409).json({ error: 'Username already taken' });
-    }
-    console.error(err);
-    res.status(500).json({ error: 'Server error' });
-  }
-});
-
-// POST /api/auth/login
-router.post('/auth/login', async (req, res) => {
-  try {
-    const { username, password } = req.body;
-    if (!username || !password) {
-      return res.status(400).json({ error: 'Username and password required' });
-    }
-
-    const lowerUsername = username.toLowerCase();
-    const result = await pool.query('SELECT * FROM users WHERE username = $1', [lowerUsername]);
-    const user = result.rows[0];
-
-    if (!user) return res.status(401).json({ error: 'Invalid credentials' });
-
-    const valid = await bcrypt.compare(password, user.password_hash);
-    if (!valid) return res.status(401).json({ error: 'Invalid credentials' });
-
-    const token = signToken({ id: user.id, username: user.username });
-    res.json({ token, user: { id: user.id, username: user.username } });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Server error' });
-  }
-});
-
-// GET /api/auth/me
-router.get('/auth/me', authMiddleware, (req, res) => {
-  res.json({ user: { id: req.user.id, username: req.user.username } });
-});
-
-// GET /api/rooms — list rooms the user has participated in
-router.get('/rooms', authMiddleware, async (req, res) => {
-  try {
-    const result = await pool.query(
-      `SELECT r.id, r.status, r.current_turn, r.created_at, r.updated_at,
-        wu.username AS white_username, wu.id AS white_id,
-        bu.username AS black_username, bu.id AS black_id,
-        win.username AS winner_username
-       FROM rooms r
-       LEFT JOIN users wu ON wu.id = r.white_player_id
-       LEFT JOIN users bu ON bu.id = r.black_player_id
-       LEFT JOIN users win ON win.id = r.winner_id
-       WHERE r.white_player_id = $1 OR r.black_player_id = $1
-       ORDER BY r.updated_at DESC
-       LIMIT 20`,
-      [req.user.id]
-    );
-
-    const rooms = result.rows.map(r => {
-      const myColor = r.white_id === req.user.id ? 'white' : 'black';
-      const opponent = myColor === 'white'
-        ? (r.black_id ? { id: r.black_id, username: r.black_username } : null)
-        : (r.white_id ? { id: r.white_id, username: r.white_username } : null);
-      return {
-        id: r.id,
-        status: r.status,
-        currentTurn: r.current_turn,
-        myColor,
-        opponent,
-        winner: r.winner_username || null,
-        updatedAt: r.updated_at,
-      };
-    });
-
-    res.json({ rooms });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Server error' });
-  }
-});
-
-// POST /api/rooms
-router.post('/rooms', authMiddleware, async (req, res) => {
-  try {
-    const boardState = boardToFen(INITIAL_BOARD);
-    const result = await pool.query(
-      `INSERT INTO rooms (white_player_id, status, board_state, current_turn)
-       VALUES ($1, 'waiting', $2, 'white')
+      `INSERT INTO rooms (white_token, black_token, status, board_state, current_turn)
+       VALUES ($1, $2, 'waiting', $3, 'white')
        RETURNING id, status`,
-      [req.user.id, boardState]
+      [color === 'white' ? token : null, color === 'black' ? token : null, boardToFen(INITIAL_BOARD)]
     );
     const room = result.rows[0];
-    res.json({ roomId: room.id, joinUrl: `/game/${room.id}`, status: room.status });
+    res.json({ roomId: room.id, joinUrl: `/game/${room.id}`, status: room.status, color, token });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Server error' });
@@ -127,47 +63,28 @@ router.post('/rooms', authMiddleware, async (req, res) => {
 });
 
 // GET /api/rooms/:id
-router.get('/rooms/:id', authMiddleware, async (req, res) => {
+router.get('/rooms/:id', async (req, res) => {
   try {
-    const result = await pool.query(
-      `SELECT r.*,
-        wu.username AS white_username,
-        bu.username AS black_username,
-        wu.id AS white_id,
-        bu.id AS black_id,
-        win.username AS winner_username,
-        win.id AS winner_id_ref
-       FROM rooms r
-       LEFT JOIN users wu ON wu.id = r.white_player_id
-       LEFT JOIN users bu ON bu.id = r.black_player_id
-       LEFT JOIN users win ON win.id = r.winner_id
-       WHERE r.id = $1`,
-      [req.params.id]
-    );
-
-    if (!result.rows[0]) return res.status(404).json({ error: 'Room not found' });
-    const room = result.rows[0];
+    const room = await findRoom(req.params.id);
+    if (!room) return res.status(404).json({ error: 'Room not found' });
 
     const movesResult = await pool.query(
       `SELECT from_square AS "from", to_square AS "to", piece, captured, move_notation AS notation, move_number
        FROM moves WHERE room_id = $1 ORDER BY move_number ASC`,
-      [req.params.id]
+      [room.id]
     );
-
-    let myColor = null;
-    if (room.white_player_id === req.user.id) myColor = 'white';
-    else if (room.black_player_id === req.user.id) myColor = 'black';
 
     res.json({
       id: room.id,
       status: room.status,
       currentTurn: room.current_turn,
       boardState: room.board_state,
-      whitePlayer: room.white_id ? { id: room.white_id, username: room.white_username } : null,
-      blackPlayer: room.black_id ? { id: room.black_id, username: room.black_username } : null,
-      winner: room.winner_id ? { id: room.winner_id, username: room.winner_username } : null,
-      myColor,
+      whiteJoined: !!room.white_token,
+      blackJoined: !!room.black_token,
+      winner: room.winner,
+      myColor: colorForToken(room, playerToken(req)),
       moves: movesResult.rows,
+      castlingRights: castlingRightsOf(room),
     });
   } catch (err) {
     console.error(err);
@@ -175,31 +92,62 @@ router.get('/rooms/:id', authMiddleware, async (req, res) => {
   }
 });
 
-// POST /api/rooms/:id/join
-router.post('/rooms/:id/join', authMiddleware, async (req, res) => {
+// POST /api/rooms/:id/join — take the open seat, or resume with an existing token.
+// Anyone arriving after both seats are taken is a spectator (no token).
+router.post('/rooms/:id/join', async (req, res) => {
   try {
-    const result = await pool.query('SELECT * FROM rooms WHERE id = $1', [req.params.id]);
-    if (!result.rows[0]) return res.status(404).json({ error: 'Room not found' });
-    const room = result.rows[0];
+    const room = await findRoom(req.params.id);
+    if (!room) return res.status(404).json({ error: 'Room not found' });
 
-    // Already in room
-    if (room.white_player_id === req.user.id) {
-      return res.json({ color: 'white', status: room.status });
-    }
-    if (room.black_player_id === req.user.id) {
-      return res.json({ color: 'black', status: room.status });
-    }
+    const existing = colorForToken(room, playerToken(req));
+    if (existing) return res.json({ color: existing, status: room.status });
 
-    // Assign as black if slot open
-    if (!room.black_player_id) {
-      await pool.query(
-        `UPDATE rooms SET black_player_id = $1, status = 'active', updated_at = NOW() WHERE id = $2`,
-        [req.user.id, req.params.id]
+    const openColor = !room.white_token ? 'white' : !room.black_token ? 'black' : null;
+    if (openColor) {
+      const token = newToken();
+      // The IS NULL condition makes sure only one visitor can win the seat.
+      const claimed = await pool.query(
+        `UPDATE rooms SET ${openColor}_token = $1, status = 'active', updated_at = NOW()
+         WHERE id = $2 AND ${openColor}_token IS NULL RETURNING id`,
+        [token, room.id]
       );
-      return res.json({ color: 'black', status: 'active' });
+      if (claimed.rowCount > 0) return res.json({ color: openColor, status: 'active', token });
     }
 
-    return res.status(400).json({ error: 'Room is full' });
+    res.json({ color: 'spectator', status: room.status });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// GET /api/push/vapid-public-key (public)
+router.get('/push/vapid-public-key', (req, res) => {
+  const publicKey = process.env.VAPID_PUBLIC_KEY;
+  if (!publicKey) return res.status(503).json({ error: 'Push not configured' });
+  res.json({ publicKey });
+});
+
+// POST /api/rooms/:id/push — subscribe this player (identified by their room token)
+router.post('/rooms/:id/push', async (req, res) => {
+  const { endpoint, keys } = req.body || {};
+  if (!endpoint || !keys || !keys.p256dh || !keys.auth) {
+    return res.status(400).json({ error: 'Invalid subscription' });
+  }
+  try {
+    const room = await findRoom(req.params.id);
+    if (!room) return res.status(404).json({ error: 'Room not found' });
+    const color = colorForToken(room, playerToken(req));
+    if (!color) return res.status(403).json({ error: 'Only players can subscribe' });
+
+    await pool.query(
+      `INSERT INTO push_subscriptions (room_id, color, endpoint, p256dh, auth)
+       VALUES ($1, $2, $3, $4, $5)
+       ON CONFLICT (room_id, endpoint) DO UPDATE
+       SET color = EXCLUDED.color, p256dh = EXCLUDED.p256dh, auth = EXCLUDED.auth`,
+      [room.id, color, endpoint, keys.p256dh, keys.auth]
+    );
+    res.json({ success: true });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Server error' });

@@ -39,7 +39,11 @@ docker compose restart app # restart app only (DB state preserved)
 node -e "require('./server/chess.js'); require('./server/routes.js'); console.log('OK')"
 ```
 
-There are no automated tests. Verification is done by running the server and manually exercising the smoke-test checklist in the original spec.
+### Tests
+```bash
+npm test                      # Jest unit + integration (needs local Postgres, uses chessdb_test)
+cd client && npm run build && npm run e2e   # Playwright, two real browsers (needs built client)
+```
 
 ## Architecture
 
@@ -83,9 +87,19 @@ Server → Client: `connected | player_joined | move | game_over | player_left |
 
 The `move` broadcast includes the full `boardState` JSON so any reconnecting client can catch up without a separate API call.
 
-### Auth
+### Anonymous players (no accounts)
 
-JWT stored in `localStorage` (`chess_token`, `chess_user`). Expiry: 7 days. The same `verifyToken` logic is used for both HTTP (`authMiddleware`) and WebSocket (`wsAuth` reads token from query param).
+There are no user accounts, sign-up, or game history. Someone creates a game (`POST /api/rooms`) and shares the `/game/:id` link; whoever opens it first takes the black seat, anyone after that is a spectator.
+
+A seat is proven by a secret per-room token (`white_token` / `black_token` on `rooms`), returned when the seat is taken and kept in the browser's `localStorage` as `chess_room_<roomId>` (`client/src/utils/player.js`). HTTP sends it as the `X-Player-Token` header, the WebSocket as the optional `?token=` query param. No valid token = spectator. Clearing site data loses the seat.
+
+### Castling
+
+Castling rights are stored per room as six `*_moved` booleans (king, and each rook). `applyMove(board, from, to, promotion, castlingRights)` returns `isCastle` and `newCastlingRights`; a castle is sent as a normal two-square king move. Both engines must keep the same castling legality logic.
+
+### Web push
+
+`server/push.js` (`sendPushToPlayer(roomId, color, payload)`) notifies the opponent after a move and on game over via the `web-push` library. Subscriptions are stored per room + colour (`push_subscriptions`) via `POST /api/rooms/:id/push`. Needs `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY`, `VAPID_SUBJECT`; without them push is silently skipped. The service worker is `client/public/sw.js`. Push requires HTTPS (or localhost).
 
 ### Piece animations
 
@@ -97,4 +111,4 @@ JWT stored in `localStorage` (`chess_token`, `chess_user`). Expiry: 7 days. The 
 
 ## Environment variables
 
-See `.env.example`. Defaults work for local dev with a running Postgres instance. The `DB_*` vars default to `localhost/chessdb/chess/chesspass`. `JWT_SECRET` defaults to `chess-secret-key` — change in production.
+See `.env.example`. Defaults work for local dev with a running Postgres instance. The `DB_*` vars default to `localhost/chessdb/chess/chesspass`. The `VAPID_*` vars are only needed for push notifications (generate with `npx web-push generate-vapid-keys`).

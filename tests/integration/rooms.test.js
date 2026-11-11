@@ -1,244 +1,140 @@
 const request = require('supertest');
 const { app } = require('../../server/app');
-const { createUser } = require('../helpers');
+const { createActiveRoom } = require('../helpers');
+
+const asPlayer = (req, token) => (token ? req.set('X-Player-Token', token) : req);
 
 describe('Rooms API', () => {
-  let whiteToken, whiteUserId, blackToken, blackUserId;
-
-  beforeEach(async () => {
-    const white = await createUser('whiteuser', 'password123');
-    whiteToken = white.token;
-    whiteUserId = white.user.id;
-
-    const black = await createUser('blackuser', 'password123');
-    blackToken = black.token;
-    blackUserId = black.user.id;
-  });
-
   describe('POST /api/rooms', () => {
-    test('Creates a new room', async () => {
-      const res = await request(app)
-        .post('/api/rooms')
-        .set('Authorization', `Bearer ${whiteToken}`);
-
+    test('Creates a room with no login and returns the creator\'s token', async () => {
+      const res = await request(app).post('/api/rooms');
       expect(res.status).toBe(200);
       expect(res.body.roomId).toBeDefined();
-      expect(res.body.joinUrl).toBeDefined();
+      expect(res.body.joinUrl).toBe(`/game/${res.body.roomId}`);
       expect(res.body.status).toBe('waiting');
+      expect(['white', 'black']).toContain(res.body.color);
+      expect(res.body.token).toBeDefined();
     });
 
-    test('Join URL has correct format', async () => {
-      const res = await request(app)
-        .post('/api/rooms')
-        .set('Authorization', `Bearer ${whiteToken}`);
-
-      expect(res.body.joinUrl).toMatch(/^\/game\/.+/);
+    test('Creator can choose white; the other seat stays open', async () => {
+      const created = (await request(app).post('/api/rooms').send({ color: 'white' })).body;
+      expect(created.color).toBe('white');
+      const res = await asPlayer(request(app).get(`/api/rooms/${created.roomId}`), created.token);
+      expect(res.body.myColor).toBe('white');
+      expect(res.body).toMatchObject({ whiteJoined: true, blackJoined: false, currentTurn: 'white', moves: [] });
     });
 
-    test('Requires authentication', async () => {
-      const res = await request(app)
-        .post('/api/rooms');
-
-      expect(res.status).toBe(401);
+    test('Creator can choose black; white still moves first', async () => {
+      const created = (await request(app).post('/api/rooms').send({ color: 'black' })).body;
+      expect(created.color).toBe('black');
+      const res = await asPlayer(request(app).get(`/api/rooms/${created.roomId}`), created.token);
+      expect(res.body.myColor).toBe('black');
+      expect(res.body).toMatchObject({ whiteJoined: false, blackJoined: true, currentTurn: 'white' });
     });
 
-    test('Room creator becomes white player', async () => {
-      const createRes = await request(app)
-        .post('/api/rooms')
-        .set('Authorization', `Bearer ${whiteToken}`);
+    test('Defaults to random and ends up with either color', async () => {
+      const colors = new Set();
+      for (let i = 0; i < 30 && colors.size < 2; i++) {
+        const res = await request(app).post('/api/rooms');
+        expect(['white', 'black']).toContain(res.body.color);
+        colors.add(res.body.color);
+      }
+      expect(colors.size).toBe(2);
+    });
 
-      const roomId = createRes.body.roomId;
-
-      const getRes = await request(app)
-        .get(`/api/rooms/${roomId}`)
-        .set('Authorization', `Bearer ${whiteToken}`);
-
-      expect(getRes.body.whitePlayer.id).toBe(whiteUserId);
-      expect(getRes.body.myColor).toBe('white');
-      expect(getRes.body.blackPlayer).toBeNull();
+    test('Rejects an unknown color', async () => {
+      const res = await request(app).post('/api/rooms').send({ color: 'purple' });
+      expect(res.status).toBe(400);
     });
   });
 
   describe('GET /api/rooms/:id', () => {
-    let roomId;
-
-    beforeEach(async () => {
-      const res = await request(app)
-        .post('/api/rooms')
-        .set('Authorization', `Bearer ${whiteToken}`);
-      roomId = res.body.roomId;
+    test('404 for unknown or malformed ids', async () => {
+      expect((await request(app).get('/api/rooms/00000000-0000-0000-0000-000000000000')).status).toBe(404);
+      expect((await request(app).get('/api/rooms/not-a-uuid')).status).toBe(404);
     });
 
-    test('Returns room details', async () => {
-      const res = await request(app)
-        .get(`/api/rooms/${roomId}`)
-        .set('Authorization', `Bearer ${whiteToken}`);
-
-      expect(res.status).toBe(200);
-      expect(res.body.id).toBe(roomId);
-      expect(res.body.status).toBe('waiting');
-      expect(res.body.currentTurn).toBe('white');
-      expect(res.body.boardState).toBeDefined();
+    test('Visitors without a valid token have no color', async () => {
+      const room = await createActiveRoom();
+      expect((await request(app).get(`/api/rooms/${room.id}`)).body.myColor).toBeNull();
+      expect((await asPlayer(request(app).get(`/api/rooms/${room.id}`), 'wrong')).body.myColor).toBeNull();
     });
 
-    test('Returns move history', async () => {
-      const res = await request(app)
-        .get(`/api/rooms/${roomId}`)
-        .set('Authorization', `Bearer ${whiteToken}`);
-
-      expect(res.body.moves).toBeDefined();
-      expect(Array.isArray(res.body.moves)).toBe(true);
+    test('Does not leak the players\' tokens', async () => {
+      const room = await createActiveRoom();
+      const res = await asPlayer(request(app).get(`/api/rooms/${room.id}`), room.whiteToken);
+      expect(JSON.stringify(res.body)).not.toContain(room.whiteToken);
+      expect(JSON.stringify(res.body)).not.toContain(room.blackToken);
     });
 
-    test('Assigns correct myColor to white player', async () => {
-      const res = await request(app)
-        .get(`/api/rooms/${roomId}`)
-        .set('Authorization', `Bearer ${whiteToken}`);
-
-      expect(res.body.myColor).toBe('white');
+    test('Each token resolves to its own color', async () => {
+      const room = await createActiveRoom();
+      expect((await asPlayer(request(app).get(`/api/rooms/${room.id}`), room.whiteToken)).body.myColor).toBe('white');
+      expect((await asPlayer(request(app).get(`/api/rooms/${room.id}`), room.blackToken)).body.myColor).toBe('black');
     });
 
-    test('Returns 404 for non-existent room', async () => {
-      const res = await request(app)
-        .get(`/api/rooms/00000000-0000-0000-0000-000000000000`)
-        .set('Authorization', `Bearer ${whiteToken}`);
-
-      expect(res.status).toBe(404);
-      expect(res.body.error).toBe('Room not found');
-    });
-
-    test('Requires authentication', async () => {
-      const res = await request(app)
-        .get(`/api/rooms/${roomId}`);
-
-      expect(res.status).toBe(401);
-    });
-
-    test('Non-participant sees myColor as null', async () => {
-      const res = await request(app)
-        .get(`/api/rooms/${roomId}`)
-        .set('Authorization', `Bearer ${blackToken}`);
-
-      expect(res.body.myColor).toBeNull();
+    test('Includes castling rights', async () => {
+      const room = await createActiveRoom({ castlingRights: { whiteKingMoved: true } });
+      const res = await request(app).get(`/api/rooms/${room.id}`);
+      expect(res.body.castlingRights.whiteKingMoved).toBe(true);
+      expect(res.body.castlingRights.blackKingMoved).toBe(false);
     });
   });
 
   describe('POST /api/rooms/:id/join', () => {
-    let roomId;
-
-    beforeEach(async () => {
-      const res = await request(app)
-        .post('/api/rooms')
-        .set('Authorization', `Bearer ${whiteToken}`);
-      roomId = res.body.roomId;
-    });
-
-    test('Black player can join room', async () => {
-      const res = await request(app)
-        .post(`/api/rooms/${roomId}/join`)
-        .set('Authorization', `Bearer ${blackToken}`);
-
-      expect(res.status).toBe(200);
-      expect(res.body.color).toBe('black');
+    test.each(['white', 'black'])('Creator plays %s: the first visitor gets the other seat and the game starts', async (mine) => {
+      const created = (await request(app).post('/api/rooms').send({ color: mine })).body;
+      const theirs = mine === 'white' ? 'black' : 'white';
+      const res = await request(app).post(`/api/rooms/${created.roomId}/join`);
+      expect(res.body.color).toBe(theirs);
       expect(res.body.status).toBe('active');
+      expect(res.body.token).toBeDefined();
+      expect(res.body.token).not.toBe(created.token);
+
+      const room = await asPlayer(request(app).get(`/api/rooms/${created.roomId}`), res.body.token);
+      expect(room.body.myColor).toBe(theirs);
+      expect(room.body.status).toBe('active');
     });
 
-    test('Room status becomes active after black joins', async () => {
-      await request(app)
-        .post(`/api/rooms/${roomId}/join`)
-        .set('Authorization', `Bearer ${blackToken}`);
+    test('Rejoining with a token keeps the same seat and issues no new token', async () => {
+      const created = (await request(app).post('/api/rooms')).body;
+      const res = await asPlayer(request(app).post(`/api/rooms/${created.roomId}/join`), created.token);
+      expect(res.body.color).toBe(created.color);
+      expect(res.body.token).toBeUndefined();
 
-      const getRes = await request(app)
-        .get(`/api/rooms/${roomId}`)
-        .set('Authorization', `Bearer ${whiteToken}`);
-
-      expect(getRes.body.status).toBe('active');
+      const black = (await request(app).post(`/api/rooms/${created.roomId}/join`)).body;
+      const again = await asPlayer(request(app).post(`/api/rooms/${created.roomId}/join`), black.token);
+      expect(again.body.color).toBe(created.color === 'white' ? 'black' : 'white');
     });
 
-    test('Join is idempotent for existing players', async () => {
-      // White player joins as white
-      const res1 = await request(app)
-        .post(`/api/rooms/${roomId}/join`)
-        .set('Authorization', `Bearer ${whiteToken}`);
-
-      expect(res1.status).toBe(200);
-      expect(res1.body.color).toBe('white');
-      expect(res1.body.status).toBe('waiting');
+    test('Third visitor is a spectator', async () => {
+      const created = (await request(app).post('/api/rooms')).body;
+      await request(app).post(`/api/rooms/${created.roomId}/join`);
+      const res = await request(app).post(`/api/rooms/${created.roomId}/join`);
+      expect(res.status).toBe(200);
+      expect(res.body.color).toBe('spectator');
+      expect(res.body.token).toBeUndefined();
     });
 
-    test('Rejects third player from joining', async () => {
-      await request(app)
-        .post(`/api/rooms/${roomId}/join`)
-        .set('Authorization', `Bearer ${blackToken}`);
-
-      const thirdUser = await createUser('thirduser', 'password123');
-      const res = await request(app)
-        .post(`/api/rooms/${roomId}/join`)
-        .set('Authorization', `Bearer ${thirdUser.token}`);
-
-      expect(res.status).toBe(400);
-      expect(res.body.error).toBe('Room is full');
+    test('Only one of two simultaneous visitors gets the seat', async () => {
+      const created = (await request(app).post('/api/rooms')).body;
+      const results = await Promise.all([
+        request(app).post(`/api/rooms/${created.roomId}/join`),
+        request(app).post(`/api/rooms/${created.roomId}/join`),
+      ]);
+      const colors = results.map(r => r.body.color).sort();
+      expect(colors).toEqual([created.color === 'white' ? 'black' : 'white', 'spectator'].sort());
     });
 
-    test('Returns 404 for non-existent room', async () => {
-      const res = await request(app)
-        .post(`/api/rooms/00000000-0000-0000-0000-000000000000/join`)
-        .set('Authorization', `Bearer ${blackToken}`);
-
+    test('404 for unknown room', async () => {
+      const res = await request(app).post('/api/rooms/00000000-0000-0000-0000-000000000000/join');
       expect(res.status).toBe(404);
-    });
-
-    test('Requires authentication', async () => {
-      const res = await request(app)
-        .post(`/api/rooms/${roomId}/join`);
-
-      expect(res.status).toBe(401);
     });
   });
 
-  describe('GET /api/rooms', () => {
-    test('Returns list of user\'s rooms', async () => {
-      // Create a room as white
-      await request(app)
-        .post('/api/rooms')
-        .set('Authorization', `Bearer ${whiteToken}`);
-
-      const res = await request(app)
-        .get('/api/rooms')
-        .set('Authorization', `Bearer ${whiteToken}`);
-
-      expect(res.status).toBe(200);
-      expect(Array.isArray(res.body.rooms)).toBe(true);
-      expect(res.body.rooms.length).toBeGreaterThan(0);
-    });
-
-    test('Only returns rooms user participated in', async () => {
-      // White creates a room
-      await request(app)
-        .post('/api/rooms')
-        .set('Authorization', `Bearer ${whiteToken}`);
-
-      // Black queries
-      const res = await request(app)
-        .get('/api/rooms')
-        .set('Authorization', `Bearer ${blackToken}`);
-
-      expect(res.body.rooms.length).toBe(0);
-    });
-
-    test('Returns empty array if no rooms', async () => {
-      const res = await request(app)
-        .get('/api/rooms')
-        .set('Authorization', `Bearer ${whiteToken}`);
-
-      expect(res.body.rooms).toEqual([]);
-    });
-
-    test('Requires authentication', async () => {
-      const res = await request(app)
-        .get('/api/rooms');
-
-      expect(res.status).toBe(401);
-    });
+  test('Removed account endpoints no longer exist', async () => {
+    expect((await request(app).post('/api/auth/register').send({ username: 'abc', password: 'password1' })).status).toBe(404);
+    expect((await request(app).post('/api/auth/login').send({})).status).toBe(404);
+    expect((await request(app).get('/api/rooms')).status).toBe(404);
   });
 });

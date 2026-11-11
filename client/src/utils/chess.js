@@ -118,7 +118,7 @@ function isInCheck(board, color) {
   return isSquareAttackedBy(board, king[0], king[1], oppColor);
 }
 
-function getRawMoves(board, r, c) {
+function getRawMoves(board, r, c, castlingRights = {}) {
   const piece = board[r][c];
   if (!piece) return [];
   const color = pieceColor(piece);
@@ -191,17 +191,39 @@ function getRawMoves(board, r, c) {
         moves.push([nr, nc]);
       }
     }
+
+    // Castling (pseudo-legal here; check/attacked-square safety is enforced in getLegalMoves)
+    const kingMoved = color === 'w' ? castlingRights.whiteKingMoved : castlingRights.blackKingMoved;
+    const rookAMoved = color === 'w' ? castlingRights.whiteRookAMoved : castlingRights.blackRookAMoved;
+    const rookHMoved = color === 'w' ? castlingRights.whiteRookHMoved : castlingRights.blackRookHMoved;
+    if (!kingMoved) {
+      if (!rookHMoved && board[r][7] === color + 'R' && !board[r][5] && !board[r][6]) {
+        moves.push([r, c + 2]);
+      }
+      if (!rookAMoved && board[r][0] === color + 'R' && !board[r][1] && !board[r][2] && !board[r][3]) {
+        moves.push([r, c - 2]);
+      }
+    }
   }
 
   return moves;
 }
 
-export function getLegalMoves(board, r, c) {
+export function getLegalMoves(board, r, c, castlingRights = {}) {
   const piece = board[r][c];
   if (!piece) return [];
   const color = pieceColor(piece);
-  const raw = getRawMoves(board, r, c);
+  const type = pieceType(piece);
+  const oppColor = color === 'w' ? 'b' : 'w';
+  const raw = getRawMoves(board, r, c, castlingRights);
   return raw.filter(([tr, tc]) => {
+    if (type === 'K' && Math.abs(tc - c) === 2) {
+      if (isInCheck(board, color)) return false;
+      const midCol = tc > c ? c + 1 : c - 1;
+      if (isSquareAttackedBy(board, r, midCol, oppColor)) return false;
+      if (isSquareAttackedBy(board, r, tc, oppColor)) return false;
+      return true;
+    }
     const nb = cloneBoard(board);
     nb[tr][tc] = piece;
     nb[r][c] = null;

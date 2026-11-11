@@ -5,9 +5,7 @@ const {
   applyMove,
   squareToRC,
   rcToSquare,
-  getLegalMovesRC,
   isInCheck,
-  hasAnyLegalMove,
 } = require('../../server/chess');
 
 describe('Chess Engine', () => {
@@ -87,6 +85,40 @@ describe('Chess Engine', () => {
     test('Knight can move to all valid L-shapes', () => {
       const result = applyMove(boardToFen(INITIAL_BOARD), 'b1', 'a3');
       expect(result.valid).toBe(true);
+    });
+
+    test('Bishop can move diagonally', () => {
+      const fen = boardToFen([
+        ['bR','bN','bB','bQ','bK','bB','bN','bR'],
+        ['bP','bP','bP','bP','bP','bP','bP','bP'],
+        [null,null,null,null,null,null,null,null],
+        [null,null,null,null,null,null,null,null],
+        [null,null,null,null,null,null,null,null],
+        [null,null,null,null,null,null,null,null],
+        ['wP',null,'wP','wP','wP','wP','wP','wP'],
+        ['wR','wN','wB','wQ','wK','wB','wN','wR'],
+      ]);
+      const result = applyMove(fen, 'c1', 'a3');
+      expect(result.valid).toBe(true);
+      expect(result.notation).toBe('Ba3');
+    });
+
+    test('Bishop capture shows x in notation', () => {
+      // wB at f5, bN at d3 — diagonal capture through the empty e4 square
+      const fen = boardToFen([
+        [null,null,null,null,'bK',null,null,null],
+        [null,null,null,null,null,null,null,null],
+        [null,null,null,null,null,null,null,null],
+        [null,null,null,null,null,'wB',null,null],
+        [null,null,null,null,null,null,null,null],
+        [null,null,null,'bN',null,null,null,null],
+        [null,null,null,null,null,null,null,null],
+        [null,null,null,null,'wK',null,null,null],
+      ]);
+      const result = applyMove(fen, 'f5', 'd3');
+      expect(result.valid).toBe(true);
+      expect(result.captured).toBe('bN');
+      expect(result.notation).toBe('Bxd3');
     });
   });
 
@@ -314,6 +346,169 @@ describe('Chess Engine', () => {
       ]);
       const result = applyMove(fen, 'b6', 'b8');
       expect(result.notation).toContain('#');
+    });
+  });
+
+  describe('Castling', () => {
+    // Minimal board: white king e1 + rooks a1/h1, black king e8, everything else empty
+    function castleBoard() {
+      return [
+        [null,null,null,null,'bK',null,null,null],
+        [null,null,null,null,null,null,null,null],
+        [null,null,null,null,null,null,null,null],
+        [null,null,null,null,null,null,null,null],
+        [null,null,null,null,null,null,null,null],
+        [null,null,null,null,null,null,null,null],
+        [null,null,null,null,null,null,null,null],
+        ['wR',null,null,null,'wK',null,null,'wR'],
+      ];
+    }
+
+    test('White kingside castling', () => {
+      const result = applyMove(boardToFen(castleBoard()), 'e1', 'g1', null, {});
+      expect(result.valid).toBe(true);
+      expect(result.isCastle).toBe('kingside');
+      expect(result.notation).toBe('O-O');
+      const b = boardFromFen(result.newBoard);
+      expect(b[7][6]).toBe('wK');
+      expect(b[7][5]).toBe('wR');
+      expect(b[7][7]).toBeNull();
+    });
+
+    test('White queenside castling', () => {
+      const result = applyMove(boardToFen(castleBoard()), 'e1', 'c1', null, {});
+      expect(result.valid).toBe(true);
+      expect(result.isCastle).toBe('queenside');
+      expect(result.notation).toBe('O-O-O');
+      const b = boardFromFen(result.newBoard);
+      expect(b[7][2]).toBe('wK');
+      expect(b[7][3]).toBe('wR');
+      expect(b[7][0]).toBeNull();
+    });
+
+    test('Black kingside castling', () => {
+      const board = [
+        [null,null,null,null,'bK',null,null,null],
+        [null,null,null,null,null,null,null,null],
+        [null,null,null,null,null,null,null,null],
+        [null,null,null,null,null,null,null,null],
+        [null,null,null,null,null,null,null,null],
+        [null,null,null,null,null,null,null,null],
+        [null,null,null,null,null,null,null,null],
+        [null,null,null,null,'wK',null,null,null],
+      ];
+      board[0][0] = 'bR';
+      board[0][7] = 'bR';
+      const result = applyMove(boardToFen(board), 'e8', 'g8', null, {});
+      expect(result.valid).toBe(true);
+      expect(result.isCastle).toBe('kingside');
+      const b = boardFromFen(result.newBoard);
+      expect(b[0][6]).toBe('bK');
+      expect(b[0][5]).toBe('bR');
+    });
+
+    test('Black queenside castling', () => {
+      const board = [
+        [null,null,null,null,'bK',null,null,null],
+        [null,null,null,null,null,null,null,null],
+        [null,null,null,null,null,null,null,null],
+        [null,null,null,null,null,null,null,null],
+        [null,null,null,null,null,null,null,null],
+        [null,null,null,null,null,null,null,null],
+        [null,null,null,null,null,null,null,null],
+        [null,null,null,null,'wK',null,null,null],
+      ];
+      board[0][0] = 'bR';
+      board[0][7] = 'bR';
+      const result = applyMove(boardToFen(board), 'e8', 'c8', null, {});
+      expect(result.valid).toBe(true);
+      expect(result.isCastle).toBe('queenside');
+      const b = boardFromFen(result.newBoard);
+      expect(b[0][2]).toBe('bK');
+      expect(b[0][3]).toBe('bR');
+    });
+
+    test('Illegal when king has already moved', () => {
+      const result = applyMove(boardToFen(castleBoard()), 'e1', 'g1', null, { whiteKingMoved: true });
+      expect(result.valid).toBe(false);
+    });
+
+    test('Illegal kingside when the h-rook has moved, but queenside stays legal', () => {
+      const rights = { whiteRookHMoved: true };
+      const kingside = applyMove(boardToFen(castleBoard()), 'e1', 'g1', null, rights);
+      expect(kingside.valid).toBe(false);
+      const queenside = applyMove(boardToFen(castleBoard()), 'e1', 'c1', null, rights);
+      expect(queenside.valid).toBe(true);
+    });
+
+    test('Illegal queenside when the a-rook has moved, but kingside stays legal', () => {
+      const rights = { whiteRookAMoved: true };
+      const queenside = applyMove(boardToFen(castleBoard()), 'e1', 'c1', null, rights);
+      expect(queenside.valid).toBe(false);
+      const kingside = applyMove(boardToFen(castleBoard()), 'e1', 'g1', null, rights);
+      expect(kingside.valid).toBe(true);
+    });
+
+    test('Illegal when a piece blocks between king and rook', () => {
+      const board = castleBoard();
+      board[7][5] = 'wN'; // knight blocking f1
+      const result = applyMove(boardToFen(board), 'e1', 'g1', null, {});
+      expect(result.valid).toBe(false);
+    });
+
+    test('Illegal while king is currently in check', () => {
+      const board = castleBoard();
+      board[3][4] = 'bR'; // attacks e1 down the e-file
+      const result = applyMove(boardToFen(board), 'e1', 'g1', null, {});
+      expect(result.valid).toBe(false);
+    });
+
+    test('Illegal when king passes through an attacked square', () => {
+      const board = castleBoard();
+      board[3][5] = 'bR'; // attacks f1, the pass-through square
+      const result = applyMove(boardToFen(board), 'e1', 'g1', null, {});
+      expect(result.valid).toBe(false);
+    });
+
+    test('Illegal when king would land on an attacked square', () => {
+      const board = castleBoard();
+      board[3][6] = 'bR'; // attacks g1, the landing square
+      const result = applyMove(boardToFen(board), 'e1', 'g1', null, {});
+      expect(result.valid).toBe(false);
+    });
+
+    test('A normal king move revokes both castling rights', () => {
+      const result = applyMove(boardToFen(castleBoard()), 'e1', 'e2', null, {});
+      expect(result.valid).toBe(true);
+      expect(result.newCastlingRights.whiteKingMoved).toBe(true);
+    });
+
+    test('A normal rook move revokes only that side\'s right', () => {
+      const result = applyMove(boardToFen(castleBoard()), 'h1', 'h4', null, {});
+      expect(result.valid).toBe(true);
+      expect(result.newCastlingRights.whiteRookHMoved).toBe(true);
+      expect(result.newCastlingRights.whiteRookAMoved).toBe(false);
+    });
+
+    test('Capturing an opponent\'s unmoved home-square rook revokes their right', () => {
+      const board = castleBoard();
+      board[0][0] = 'bR'; // black queenside rook, unmoved, on a8
+      board[1][0] = 'wR'; // white rook poised to capture it on a8
+      board[7][0] = null; // remove the white a1 rook so it isn't ambiguous
+      const result = applyMove(boardToFen(board), 'a7', 'a8', null, {});
+      expect(result.valid).toBe(true);
+      expect(result.captured).toBe('bR');
+      expect(result.newCastlingRights.blackRookAMoved).toBe(true);
+    });
+
+    test('Castling move that gives check produces + notation', () => {
+      const board = castleBoard();
+      board[0][4] = null;
+      board[0][5] = 'bK'; // black king on f8, directly in front of where the rook lands
+      const result = applyMove(boardToFen(board), 'e1', 'g1', null, {});
+      expect(result.valid).toBe(true);
+      expect(result.inCheck).toBe(true);
+      expect(result.notation).toBe('O-O+');
     });
   });
 });

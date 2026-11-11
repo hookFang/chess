@@ -1,9 +1,10 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { useAuth } from '../AuthContext';
 import { apiRequest, getWsUrl } from '../utils/api';
+import { getRoomToken, setRoomToken } from '../utils/player';
 import ChessBoard from '../components/ChessBoard';
 import { PIECES } from '../utils/chess';
+import { pushSupported, subscribeToPush } from '../utils/push';
 
 /* ─── Piece value for sorting captured pieces ─── */
 const PIECE_VALUE = { P: 1, N: 3, B: 3, R: 5, Q: 9, K: 0 };
@@ -42,7 +43,7 @@ function CapturedPieces({ pieces, label }) {
 }
 
 /* ─── Player card ─── */
-function PlayerCard({ player, color, isActive, isMe, capturedPieces }) {
+function PlayerCard({ name, color, isActive, capturedPieces }) {
   const sym = color === 'white' ? '♔' : '♚';
   const symColor = color === 'white' ? '#F0E6D0' : '#1A0E05';
   const symShadow = color === 'white'
@@ -71,8 +72,7 @@ function PlayerCard({ player, color, isActive, isMe, capturedPieces }) {
             fontFamily: 'Playfair Display, serif', fontWeight: 600,
             fontSize: '0.95rem', transition: 'color 0.3s',
           }}>
-            {player?.username || <span style={{ opacity: 0.4, fontStyle: 'italic' }}>Waiting…</span>}
-            {isMe && <span style={{ color: 'rgba(201,168,76,0.6)', fontWeight: 400, fontSize: '0.78rem', marginLeft: 4 }}>(you)</span>}
+            {name || <span style={{ opacity: 0.4, fontStyle: 'italic' }}>Waiting…</span>}
           </div>
           <div style={{ color: '#5A4A38', fontSize: '0.72rem', textTransform: 'capitalize', marginTop: 1 }}>{color}</div>
         </div>
@@ -169,9 +169,9 @@ function MoveHistory({ moves }) {
 }
 
 /* ─── Game over overlay ─── */
-function GameOverOverlay({ data, myColor, username, onNewGame, onLobby }) {
+function GameOverOverlay({ data, myColor, onNewGame, onHome }) {
   if (!data) return null;
-  const { status, winnerColor, resignedBy, winnerId } = data;
+  const { status, winnerColor, resignedBy } = data;
 
   let headline, sub, isWin, isDraw;
   if (status === 'checkmate') {
@@ -180,10 +180,14 @@ function GameOverOverlay({ data, myColor, username, onNewGame, onLobby }) {
   } else if (status === 'stalemate') {
     headline = 'Stalemate'; sub = 'No legal moves'; isDraw = true;
   } else if (status === 'resignation') {
-    if (resignedBy === username) { headline = 'Resigned'; sub = 'Better luck next time'; isWin = false; }
-    else { headline = 'Victory'; sub = `${resignedBy} resigned`; isWin = true; }
+    if (resignedBy === myColor) { headline = 'Resigned'; sub = 'Better luck next time'; isWin = false; }
+    else { headline = 'Victory'; sub = myColor ? 'Your opponent resigned' : `${resignedBy} resigned`; isWin = true; }
   } else if (status === 'draw') {
     headline = 'Draw'; sub = 'Agreed draw'; isDraw = true;
+  } else if (winnerColor) {
+    headline = winnerColor === myColor ? 'Victory' : 'Game Over';
+    sub = `${winnerColor.charAt(0).toUpperCase() + winnerColor.slice(1)} won`;
+    isWin = winnerColor === myColor;
   } else {
     headline = 'Game Over'; sub = ''; isDraw = true;
   }
@@ -236,7 +240,7 @@ function GameOverOverlay({ data, myColor, username, onNewGame, onLobby }) {
           >
             New Game
           </button>
-          <button onClick={onLobby} style={{
+          <button onClick={onHome} style={{
             background: 'transparent',
             border: `1px solid rgba(138,122,96,0.4)`,
             borderRadius: 8, color: 'rgba(237,224,200,0.7)',
@@ -247,7 +251,7 @@ function GameOverOverlay({ data, myColor, username, onNewGame, onLobby }) {
             onMouseEnter={e => { e.currentTarget.style.borderColor = 'rgba(201,168,76,0.6)'; e.currentTarget.style.color = '#C9A84C'; }}
             onMouseLeave={e => { e.currentTarget.style.borderColor = 'rgba(138,122,96,0.4)'; e.currentTarget.style.color = 'rgba(237,224,200,0.7)'; }}
           >
-            Lobby
+            Home
           </button>
         </div>
       </div>
@@ -282,7 +286,6 @@ function IconBtn({ label, icon, onClick, danger, disabled }) {
 ═══════════════════════════════════════════════════ */
 export default function GamePage() {
   const { roomId } = useParams();
-  const { user, token } = useAuth();
   const navigate = useNavigate();
 
   const [room, setRoom]               = useState(null);
@@ -292,10 +295,15 @@ export default function GamePage() {
   const [moves, setMoves]             = useState([]);
   const [lastMove, setLastMove]       = useState(null);
   const [inCheck, setInCheck]         = useState(false);
+  const [castlingRights, setCastlingRights] = useState({});
   const [gameOver, setGameOver]       = useState(false);
   const [gameOverData, setGameOverData] = useState(null);
   const [wsStatus, setWsStatus]       = useState('connecting');
   const [copyFeedback, setCopyFeedback] = useState(false);
+  const [notFound, setNotFound]       = useState(false);
+  const [notifState, setNotifState]   = useState(() =>
+    pushSupported() ? (Notification.permission === 'granted' ? 'on' : Notification.permission === 'denied' ? 'blocked' : 'off') : 'unsupported'
+  );
 
   // Captured pieces: pieces each side has taken
   const [capturedByWhite, setCapturedByWhite] = useState([]); // pieces white captured (black pieces)
@@ -317,12 +325,13 @@ export default function GamePage() {
 
   const fetchRoom = useCallback(async () => {
     try {
-      const data = await apiRequest(`/rooms/${roomId}`, {}, token);
+      const data = await apiRequest(`/rooms/${roomId}`, {}, getRoomToken(roomId));
       if (!isMounted.current) return;
       setRoom(data);
       setBoardState(data.boardState);
       setCurrentTurn(data.currentTurn);
       setMyColor(data.myColor);
+      if (data.castlingRights) setCastlingRights(data.castlingRights);
       setMoves(data.moves || []);
       const { byWhite, byBlack } = buildCaptured(data.moves || []);
       setCapturedByWhite(byWhite);
@@ -333,21 +342,29 @@ export default function GamePage() {
       }
       if (data.status === 'finished') {
         setGameOver(true);
-        if (!gameOverData) setGameOverData({ status: data.status, winnerId: data.winner?.id });
+        if (!gameOverData) setGameOverData({ status: data.status, winnerColor: data.winner });
       }
     } catch (err) {
       console.error('Failed to fetch room:', err);
     }
-  }, [roomId, token, gameOverData]);
+  }, [roomId, gameOverData]);
 
+  // Take the open seat (or resume ours). The server hands out a token only when a
+  // seat is newly taken; we keep it so a refresh returns us to the same side.
   const joinRoom = useCallback(async () => {
-    try { await apiRequest(`/rooms/${roomId}/join`, { method: 'POST' }, token); }
-    catch {}
-  }, [roomId, token]);
+    try {
+      const res = await apiRequest(`/rooms/${roomId}/join`, { method: 'POST' }, getRoomToken(roomId));
+      if (res.token) setRoomToken(roomId, res.token);
+    } catch (err) {
+      if (isMounted.current) setNotFound(true);
+      return false;
+    }
+    return true;
+  }, [roomId]);
 
   const connectWs = useCallback(() => {
-    if (!token || !roomId) return;
-    const ws = new WebSocket(getWsUrl(roomId, token));
+    if (!roomId) return;
+    const ws = new WebSocket(getWsUrl(roomId, getRoomToken(roomId)));
     wsRef.current = ws;
     setWsStatus('connecting');
 
@@ -364,12 +381,14 @@ export default function GamePage() {
       let msg; try { msg = JSON.parse(event.data); } catch { return; }
 
       if (msg.type === 'connected') {
-        setMyColor(msg.color);
+        setMyColor(msg.color === 'spectator' ? null : msg.color);
+        if (msg.castlingRights) setCastlingRights(msg.castlingRights);
       } else if (msg.type === 'move') {
         setBoardState(msg.boardState);
         setCurrentTurn(msg.nextTurn);
         setInCheck(msg.inCheck || false);
         setLastMove({ from: msg.from, to: msg.to });
+        if (msg.castlingRights) setCastlingRights(msg.castlingRights);
         setMoves(prev => [...prev, {
           from: msg.from, to: msg.to, piece: msg.piece,
           captured: msg.captured, notation: msg.notation, moveNumber: msg.moveNumber,
@@ -387,17 +406,17 @@ export default function GamePage() {
         setInCheck(false);
       }
     };
-  }, [token, roomId, fetchRoom]);
+  }, [roomId, fetchRoom]);
 
   useEffect(() => {
     isMounted.current = true;
-    joinRoom().then(() => { fetchRoom(); connectWs(); });
+    joinRoom().then((ok) => { if (ok && isMounted.current) { fetchRoom(); connectWs(); } });
     return () => {
       isMounted.current = false;
       clearTimeout(reconnectTimer.current);
       wsRef.current?.close();
     };
-  }, [roomId, token]); // eslint-disable-line
+  }, [roomId]); // eslint-disable-line
 
   function handleMove(moveData) {
     if (!wsRef.current || wsRef.current.readyState !== 1) return;
@@ -408,8 +427,17 @@ export default function GamePage() {
     if (!window.confirm('Resign this game?')) return;
     wsRef.current.send(JSON.stringify({ type: 'resign' }));
   }
+  async function handleEnableNotifications() {
+    try {
+      const ok = await subscribeToPush(roomId, getRoomToken(roomId));
+      setNotifState(ok ? 'on' : (Notification.permission === 'denied' ? 'blocked' : 'off'));
+    } catch (err) {
+      console.error('Enable notifications failed:', err);
+      alert('Could not enable notifications: ' + err.message);
+    }
+  }
   function handleCopyLink() {
-    navigator.clipboard.writeText(`${window.location.origin}/game/${roomId}`).then(() => {
+    navigator.clipboard.writeText(inviteLink).then(() => {
       setCopyFeedback(true);
       setTimeout(() => setCopyFeedback(false), 2000);
     });
@@ -417,10 +445,14 @@ export default function GamePage() {
 
   const isMyTurn     = myColor && currentTurn === myColor;
   const gameActive   = room?.status === 'active' && !gameOver;
-  const whitePlayer  = room?.whitePlayer;
-  const blackPlayer  = room?.blackPlayer;
-  const opponent     = myColor === 'white' ? blackPlayer : whitePlayer;
-  const opponentColor = myColor === 'white' ? 'black' : 'white';
+  // Players see their own side at the bottom; spectators see white at the bottom.
+  const viewColor    = myColor || 'white';
+  const opponentColor = viewColor === 'white' ? 'black' : 'white';
+  const joined       = { white: !!room?.whiteJoined, black: !!room?.blackJoined };
+  const topName      = !myColor ? (joined.black ? 'Black' : null) : (joined[opponentColor] ? 'Opponent' : null);
+  const bottomName   = myColor ? 'You' : 'White';
+  const capturedBy   = (c) => (c === 'white' ? capturedByWhite : capturedByBlack);
+  const inviteLink   = `${window.location.origin}/game/${roomId}`;
 
   /* Status line text */
   function statusText() {
@@ -431,6 +463,19 @@ export default function GamePage() {
     return `${currentTurn.charAt(0).toUpperCase() + currentTurn.slice(1)}'s move`;
   }
   const statusColor = inCheck ? '#E86060' : isMyTurn ? '#C9A84C' : 'rgba(138,122,96,0.7)';
+
+  if (notFound) {
+    return (
+      <div style={{
+        minHeight: '100vh', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
+        background: '#0E0C09', color: '#EDE0C8', fontFamily: 'EB Garamond, serif', gap: '1rem',
+      }}>
+        <h2 style={{ fontFamily: 'Playfair Display, serif' }}>Game not found</h2>
+        <p style={{ color: 'rgba(237,224,200,0.6)' }}>This link doesn't match any game.</p>
+        <IconBtn icon="♚" label="Start a new game" onClick={() => navigate('/')} />
+      </div>
+    );
+  }
 
   return (
     <div style={{
@@ -484,7 +529,7 @@ export default function GamePage() {
         backdropFilter: 'blur(8px)',
         background: 'rgba(8,6,3,0.6)',
       }}>
-        <button onClick={() => navigate('/lobby')} style={{
+        <button onClick={() => navigate('/')} style={{
           background: 'none', border: 'none', cursor: 'pointer',
           color: 'rgba(138,122,96,0.7)', fontFamily: 'EB Garamond, serif', fontSize: '0.9rem',
           display: 'flex', alignItems: 'center', gap: '0.4rem',
@@ -494,7 +539,7 @@ export default function GamePage() {
           onMouseEnter={e => e.currentTarget.style.color = '#C9A84C'}
           onMouseLeave={e => e.currentTarget.style.color = 'rgba(138,122,96,0.7)'}
         >
-          ← Lobby
+          ← Home
         </button>
 
         <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
@@ -522,11 +567,10 @@ export default function GamePage() {
         }}>
           {/* Opponent top */}
           <PlayerCard
-            player={opponent}
+            name={topName}
             color={opponentColor}
             isActive={!gameOver && currentTurn === opponentColor}
-            isMe={false}
-            capturedPieces={myColor === 'white' ? capturedByBlack : capturedByWhite}
+            capturedPieces={capturedBy(opponentColor)}
           />
 
           {/* Status pill */}
@@ -547,12 +591,24 @@ export default function GamePage() {
 
           {/* Me bottom */}
           <PlayerCard
-            player={{ username: user?.username }}
-            color={myColor || 'white'}
-            isActive={!gameOver && currentTurn === myColor}
-            isMe={true}
-            capturedPieces={myColor === 'white' ? capturedByWhite : capturedByBlack}
+            name={bottomName}
+            color={viewColor}
+            isActive={!gameOver && currentTurn === viewColor}
+            capturedPieces={capturedBy(viewColor)}
           />
+
+          {room?.status === 'waiting' && myColor && (
+            <div style={{
+              background: 'rgba(201,168,76,0.08)', border: '1px solid rgba(201,168,76,0.3)',
+              borderRadius: 8, padding: '0.6rem 0.8rem', fontSize: '0.8rem', color: 'rgba(237,224,200,0.8)',
+            }}>
+              Send this link to your opponent:
+              <input readOnly value={inviteLink} onFocus={e => e.target.select()} style={{
+                width: '100%', boxSizing: 'border-box', marginTop: 6, padding: '0.35rem 0.5rem',
+                background: '#14110b', color: '#EDE0C8', border: '1px solid #3A3228', borderRadius: 5, fontSize: '0.75rem',
+              }} />
+            </div>
+          )}
 
           {/* Action buttons */}
           <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', paddingTop: '0.25rem' }}>
@@ -560,6 +616,12 @@ export default function GamePage() {
               icon="⎘" label={copyFeedback ? 'Copied!' : 'Copy invite'}
               onClick={handleCopyLink}
             />
+            {myColor && notifState === 'off' && (
+              <IconBtn icon="🔔" label="Enable notifications" onClick={handleEnableNotifications} />
+            )}
+            {myColor && notifState === 'blocked' && (
+              <IconBtn icon="🔕" label="Notifications blocked" onClick={() => alert('Notifications are blocked in your browser settings for this site.')} disabled />
+            )}
             {gameActive && myColor && (
               <IconBtn icon="⚑" label="Resign" onClick={handleResign} danger />
             )}
@@ -579,6 +641,7 @@ export default function GamePage() {
             gameOver={gameOver}
             lastMove={lastMove}
             inCheck={inCheck}
+            castlingRights={castlingRights}
           />
 
           {/* Turn indicator bar below board */}
@@ -641,14 +704,14 @@ export default function GamePage() {
         <GameOverOverlay
           data={gameOverData}
           myColor={myColor}
-          username={user?.username}
           onNewGame={async () => {
             try {
-              const data = await apiRequest('/rooms', { method: 'POST' }, token);
+              const data = await apiRequest('/rooms', { method: 'POST' });
+              setRoomToken(data.roomId, data.token);
               navigate(`/game/${data.roomId}`);
             } catch {}
           }}
-          onLobby={() => navigate('/lobby')}
+          onHome={() => navigate('/')}
         />
       )}
     </div>

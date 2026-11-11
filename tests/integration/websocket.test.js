@@ -1,7 +1,10 @@
+jest.mock('../../server/push', () => ({ sendPushToPlayer: jest.fn() }));
+
 const WebSocket = require('ws');
+const { sendPushToPlayer } = require('../../server/push');
 const { initDB, pool } = require('../../server/db');
-const { app, server } = require('../../server/app');
-const { createUser, createActiveRoom } = require('../helpers');
+const { server } = require('../../server/app');
+const { createActiveRoom } = require('../helpers');
 
 let serverInstance;
 let port;
@@ -22,9 +25,27 @@ afterAll(() => {
   return pool.end();
 });
 
+// connectWs attaches a single persistent message listener immediately, buffering every
+// message into a queue. Without this, a message that arrives between the socket opening
+// and a later `nextMessage()` call (which is common with two simultaneous clients) would
+// be silently dropped, since EventEmitter doesn't replay events to late-attached listeners.
 function connectWs(roomId, token) {
   return new Promise((resolve, reject) => {
-    const ws = new WebSocket(`ws://localhost:${port}/ws?roomId=${roomId}&token=${token}`);
+    const ws = new WebSocket(`ws://localhost:${port}/ws?room=${roomId}${token ? `&token=${token}` : ''}`);
+    ws._messageQueue = [];
+    ws._messageWaiters = [];
+    ws.on('message', (data) => {
+      let msg;
+      try { msg = JSON.parse(data); } catch { return; }
+      const idx = ws._messageWaiters.findIndex(w => w.type === msg.type);
+      if (idx !== -1) {
+        const [waiter] = ws._messageWaiters.splice(idx, 1);
+        clearTimeout(waiter.timeout);
+        waiter.resolve(msg);
+      } else {
+        ws._messageQueue.push(msg);
+      }
+    });
     ws.on('open', () => resolve(ws));
     ws.on('error', reject);
   });
@@ -32,235 +53,302 @@ function connectWs(roomId, token) {
 
 function nextMessage(ws, type, timeoutMs = 1000) {
   return new Promise((resolve, reject) => {
+    const idx = ws._messageQueue.findIndex(m => m.type === type);
+    if (idx !== -1) {
+      const [msg] = ws._messageQueue.splice(idx, 1);
+      resolve(msg);
+      return;
+    }
     const timeout = setTimeout(() => {
+      const i = ws._messageWaiters.findIndex(w => w.type === type);
+      if (i !== -1) ws._messageWaiters.splice(i, 1);
       reject(new Error(`Timeout waiting for message type: ${type}`));
     }, timeoutMs);
-
-    const handler = (data) => {
-      try {
-        const msg = JSON.parse(data);
-        if (msg.type === type) {
-          ws.removeEventListener('message', handler);
-          clearTimeout(timeout);
-          resolve(msg);
-        }
-      } catch (e) {
-        reject(e);
-      }
-    };
-
-    ws.on('message', handler);
+    ws._messageWaiters.push({ type, resolve, timeout });
   });
 }
 
 describe('WebSocket API', () => {
+  const kingsAndRooks = () => [
+    [null,null,null,null,'bK',null,null,null],
+    [null,null,null,null,null,null,null,null],
+    [null,null,null,null,null,null,null,null],
+    [null,null,null,null,null,null,null,null],
+    [null,null,null,null,null,null,null,null],
+    [null,null,null,null,null,null,null,null],
+    [null,null,null,null,null,null,null,null],
+    ['wR',null,null,null,'wK',null,null,'wR'],
+  ];
+
   describe('Connection', () => {
-    test('Valid token receives connected message', async () => {
-      const white = await createUser('ws_white_1', 'password123');
-      const black = await createUser('ws_black_1', 'password123');
-      const room = await createActiveRoom(white.user.id, black.user.id);
+    test('Tokens decide the color; no login is needed', async () => {
+      const room = await createActiveRoom();
+      const white = await connectWs(room.id, room.whiteToken);
+      const black = await connectWs(room.id, room.blackToken);
+      const spectator = await connectWs(room.id);
 
-      const ws = await connectWs(room.id, white.token);
-      const msg = await nextMessage(ws, 'connected');
+      const w = await nextMessage(white, 'connected');
+      expect(w.color).toBe('white');
+      expect(w.roomStatus).toBe('active');
+      expect((await nextMessage(black, 'connected')).color).toBe('black');
+      expect((await nextMessage(spectator, 'connected')).color).toBe('spectator');
+      [white, black, spectator].forEach(ws => ws.close());
+    });
 
-      expect(msg.type).toBe('connected');
-      expect(msg.color).toBe('white');
-      expect(msg.roomId).toBe(room.id);
-
+    test('A wrong token is treated as a spectator', async () => {
+      const room = await createActiveRoom();
+      const ws = await connectWs(room.id, 'not-a-real-token');
+      expect((await nextMessage(ws, 'connected')).color).toBe('spectator');
       ws.close();
     });
 
-    test('Invalid token disconnects', async () => {
-      const white = await createUser('ws_white_2', 'password123');
-      const black = await createUser('ws_black_2', 'password123');
-      const room = await createActiveRoom(white.user.id, black.user.id);
+    test('Unknown room closes the connection', async () => {
+      const ws = new WebSocket(`ws://localhost:${port}/ws?room=00000000-0000-0000-0000-000000000000`);
+      const code = await new Promise((resolve) => ws.on('close', resolve));
+      expect(code).toBe(4004);
+    });
 
-      try {
-        const ws = new WebSocket(`ws://localhost:${port}/ws?roomId=${room.id}&token=invalid.token`);
-        await new Promise((resolve, reject) => {
-          ws.on('close', resolve);
-          ws.on('message', () => reject(new Error('Should not receive messages')));
-          setTimeout(() => reject(new Error('WebSocket should close')), 2000);
-        });
-      } catch (e) {
-        expect(e.message).toBe('WebSocket should close');
-        // Expected - invalid token should close connection
-      }
+    test('Other players are told when someone joins', async () => {
+      const room = await createActiveRoom();
+      const white = await connectWs(room.id, room.whiteToken);
+      await nextMessage(white, 'connected');
+      const black = await connectWs(room.id, room.blackToken);
+      const joined = await nextMessage(white, 'player_joined');
+      expect(joined.color).toBe('black');
+      white.close();
+      black.close();
     });
   });
 
   describe('Move Flow', () => {
     test('Valid move broadcasts to both players', async () => {
-      const white = await createUser('ws_white_3', 'password123');
-      const black = await createUser('ws_black_3', 'password123');
-      const room = await createActiveRoom(white.user.id, black.user.id);
+      const room = await createActiveRoom();
+      const wsWhite = await connectWs(room.id, room.whiteToken);
+      const wsBlack = await connectWs(room.id, room.blackToken);
+      await nextMessage(wsWhite, 'connected');
+      await nextMessage(wsBlack, 'connected');
 
-      const wsWhite = await connectWs(room.id, white.token);
-      const wsBlack = await connectWs(room.id, black.token);
+      wsWhite.send(JSON.stringify({ type: 'move', from: 'e2', to: 'e4', piece: 'wP' }));
 
-      // Both get connected messages
-      const whiteConnected = await nextMessage(wsWhite, 'connected');
-      const blackConnected = await nextMessage(wsBlack, 'connected');
-
-      expect(whiteConnected.color).toBe('white');
-      expect(blackConnected.color).toBe('black');
-
-      // White moves e2->e4
-      wsWhite.send(JSON.stringify({
-        type: 'move',
-        from: 'e2',
-        to: 'e4',
-        piece: 'wP',
-      }));
-
-      // Both should receive move confirmation
-      const whiteMove = await nextMessage(wsWhite, 'move_made');
-      const blackMove = await nextMessage(wsBlack, 'move_made');
-
+      const whiteMove = await nextMessage(wsWhite, 'move');
+      const blackMove = await nextMessage(wsBlack, 'move');
       expect(whiteMove.from).toBe('e2');
-      expect(whiteMove.to).toBe('e4');
-      expect(blackMove.from).toBe('e2');
       expect(blackMove.to).toBe('e4');
-
+      expect(blackMove.nextTurn).toBe('black');
       wsWhite.close();
       wsBlack.close();
     });
 
     test('Invalid move sends error', async () => {
-      const white = await createUser('ws_white_4', 'password123');
-      const black = await createUser('ws_black_4', 'password123');
-      const room = await createActiveRoom(white.user.id, black.user.id);
-
-      const wsWhite = await connectWs(room.id, white.token);
+      const room = await createActiveRoom();
+      const wsWhite = await connectWs(room.id, room.whiteToken);
       await nextMessage(wsWhite, 'connected');
-
-      // Try invalid move (pawn can't move 3 squares)
-      wsWhite.send(JSON.stringify({
-        type: 'move',
-        from: 'e2',
-        to: 'e5',
-        piece: 'wP',
-      }));
-
+      wsWhite.send(JSON.stringify({ type: 'move', from: 'e2', to: 'e5', piece: 'wP' }));
       const error = await nextMessage(wsWhite, 'error');
-      expect(error.type).toBe('error');
       expect(error.message).toBeDefined();
-
       wsWhite.close();
     });
 
-    test('Illegal move doesn\'t change board', async () => {
-      const white = await createUser('ws_white_5', 'password123');
-      const black = await createUser('ws_black_5', 'password123');
-      const room = await createActiveRoom(white.user.id, black.user.id);
-
-      const wsWhite = await connectWs(room.id, white.token);
-      const wsBlack = await connectWs(room.id, black.token);
-
+    test('Illegal move doesn\'t reach the opponent or change the board', async () => {
+      const room = await createActiveRoom();
+      const wsWhite = await connectWs(room.id, room.whiteToken);
+      const wsBlack = await connectWs(room.id, room.blackToken);
       await nextMessage(wsWhite, 'connected');
       await nextMessage(wsBlack, 'connected');
 
-      // Try illegal move
-      wsWhite.send(JSON.stringify({
-        type: 'move',
-        from: 'e2',
-        to: 'e5',
-        piece: 'wP',
-      }));
+      wsWhite.send(JSON.stringify({ type: 'move', from: 'e2', to: 'e5', piece: 'wP' }));
+      await nextMessage(wsWhite, 'error');
+      await expect(nextMessage(wsBlack, 'move', 400)).rejects.toThrow('Timeout');
 
-      const error = await nextMessage(wsWhite, 'error');
-      expect(error.type).toBe('error');
-
-      // Black should not receive move_made
-      const timer = setTimeout(() => {}, 500);
-      let receivedMove = false;
-      wsBlack.once('message', (data) => {
-        const msg = JSON.parse(data);
-        if (msg.type === 'move_made') receivedMove = true;
-      });
-
-      // Wait a bit to see if Black gets a move
-      await new Promise(r => setTimeout(r, 500));
-      clearTimeout(timer);
-      expect(receivedMove).toBe(false);
-
+      const row = await pool.query('SELECT current_turn FROM rooms WHERE id = $1', [room.id]);
+      expect(row.rows[0].current_turn).toBe('white');
       wsWhite.close();
       wsBlack.close();
+    });
+
+    test('Cannot move when not your turn', async () => {
+      const room = await createActiveRoom();
+      const wsBlack = await connectWs(room.id, room.blackToken);
+      await nextMessage(wsBlack, 'connected');
+      wsBlack.send(JSON.stringify({ type: 'move', from: 'e7', to: 'e5', piece: 'bP' }));
+      const error = await nextMessage(wsBlack, 'error');
+      expect(error.message).toContain('Not your turn');
+      wsBlack.close();
+    });
+
+    test('Spectators cannot move', async () => {
+      const room = await createActiveRoom();
+      const spectator = await connectWs(room.id);
+      await nextMessage(spectator, 'connected');
+      spectator.send(JSON.stringify({ type: 'move', from: 'e2', to: 'e4', piece: 'wP' }));
+      const error = await nextMessage(spectator, 'error');
+      expect(error.message).toContain('Spectators');
+      spectator.close();
+    });
+
+    test('Checkmate ends the game and records the winner', async () => {
+      // Back-rank mate: white rook a1 -> a8 against a boxed-in black king on h8
+      const board = [
+        [null,null,null,null,null,null,null,'bK'],
+        [null,null,null,null,null,null,'bP','bP'],
+        [null,null,null,null,null,null,null,null],
+        [null,null,null,null,null,null,null,null],
+        [null,null,null,null,null,null,null,null],
+        [null,null,null,null,null,null,null,null],
+        [null,null,null,null,null,null,null,null],
+        ['wR',null,null,null,'wK',null,null,null],
+      ];
+      const room = await createActiveRoom({ board });
+      const wsWhite = await connectWs(room.id, room.whiteToken);
+      await nextMessage(wsWhite, 'connected');
+      wsWhite.send(JSON.stringify({ type: 'move', from: 'a1', to: 'a8', piece: 'wR' }));
+
+      const over = await nextMessage(wsWhite, 'game_over');
+      expect(over.status).toBe('checkmate');
+      expect(over.winnerColor).toBe('white');
+      const row = await pool.query('SELECT status, winner FROM rooms WHERE id = $1', [room.id]);
+      expect(row.rows[0]).toEqual({ status: 'finished', winner: 'white' });
+      wsWhite.close();
     });
   });
 
   describe('Game Events', () => {
-    test('Resign triggers game_over', async () => {
-      const white = await createUser('ws_white_6', 'password123');
-      const black = await createUser('ws_black_6', 'password123');
-      const room = await createActiveRoom(white.user.id, black.user.id);
-
-      const wsWhite = await connectWs(room.id, white.token);
-      const wsBlack = await connectWs(room.id, black.token);
-
+    test('Resign triggers game_over for everyone', async () => {
+      const room = await createActiveRoom();
+      const wsWhite = await connectWs(room.id, room.whiteToken);
+      const wsBlack = await connectWs(room.id, room.blackToken);
       await nextMessage(wsWhite, 'connected');
       await nextMessage(wsBlack, 'connected');
 
-      // White resigns
       wsWhite.send(JSON.stringify({ type: 'resign' }));
 
-      const whiteGameOver = await nextMessage(wsWhite, 'game_over');
-      const blackGameOver = await nextMessage(wsBlack, 'game_over');
-
-      expect(whiteGameOver.winner).toBe('black');
-      expect(blackGameOver.winner).toBe('black');
-
+      const whiteOver = await nextMessage(wsWhite, 'game_over');
+      const blackOver = await nextMessage(wsBlack, 'game_over');
+      expect(whiteOver.winnerColor).toBe('black');
+      expect(blackOver.resignedBy).toBe('white');
       wsWhite.close();
       wsBlack.close();
     });
 
+    test('Spectators cannot resign or accept a draw', async () => {
+      const room = await createActiveRoom();
+      const spectator = await connectWs(room.id);
+      await nextMessage(spectator, 'connected');
+      spectator.send(JSON.stringify({ type: 'resign' }));
+      spectator.send(JSON.stringify({ type: 'accept_draw' }));
+      await new Promise(r => setTimeout(r, 300));
+      const row = await pool.query('SELECT status FROM rooms WHERE id = $1', [room.id]);
+      expect(row.rows[0].status).toBe('active');
+      spectator.close();
+    });
+
     test('Disconnect triggers player_left', async () => {
-      const white = await createUser('ws_white_7', 'password123');
-      const black = await createUser('ws_black_7', 'password123');
-      const room = await createActiveRoom(white.user.id, black.user.id);
-
-      const wsWhite = await connectWs(room.id, white.token);
-      const wsBlack = await connectWs(room.id, black.token);
-
+      const room = await createActiveRoom();
+      const wsWhite = await connectWs(room.id, room.whiteToken);
+      const wsBlack = await connectWs(room.id, room.blackToken);
       await nextMessage(wsWhite, 'connected');
       await nextMessage(wsBlack, 'connected');
-
-      // White disconnects
       wsWhite.close();
+      const left = await nextMessage(wsBlack, 'player_left');
+      expect(left.color).toBe('white');
+      wsBlack.close();
+    });
 
-      const playerLeft = await nextMessage(wsBlack, 'player_left');
-      expect(playerLeft.type).toBe('player_left');
-
+    test('Draw offers reach the other player', async () => {
+      const room = await createActiveRoom();
+      const wsWhite = await connectWs(room.id, room.whiteToken);
+      const wsBlack = await connectWs(room.id, room.blackToken);
+      await nextMessage(wsWhite, 'connected');
+      await nextMessage(wsBlack, 'connected');
+      wsWhite.send(JSON.stringify({ type: 'offer_draw' }));
+      expect((await nextMessage(wsBlack, 'draw_offered')).from).toBe('white');
+      wsWhite.close();
       wsBlack.close();
     });
   });
 
-  describe('Turn Enforcement', () => {
-    test('Cannot move when not your turn', async () => {
-      const white = await createUser('ws_white_8', 'password123');
-      const black = await createUser('ws_black_8', 'password123');
-      const room = await createActiveRoom(white.user.id, black.user.id);
+  describe('Push notifications', () => {
+    beforeEach(() => sendPushToPlayer.mockClear());
 
-      const wsWhite = await connectWs(room.id, white.token);
-      const wsBlack = await connectWs(room.id, black.token);
+    test('Move pushes to the opponent only', async () => {
+      const room = await createActiveRoom();
+      const wsWhite = await connectWs(room.id, room.whiteToken);
+      await nextMessage(wsWhite, 'connected');
+      wsWhite.send(JSON.stringify({ type: 'move', from: 'e2', to: 'e4', piece: 'wP' }));
+      await nextMessage(wsWhite, 'move');
 
+      expect(sendPushToPlayer).toHaveBeenCalledTimes(1);
+      const [roomId, color, payload] = sendPushToPlayer.mock.calls[0];
+      expect(roomId).toBe(room.id);
+      expect(color).toBe('black');
+      expect(payload).toEqual({ title: 'White moved', body: 'e4', url: `/game/${room.id}` });
+      wsWhite.close();
+    });
+
+    test('Resign pushes to the winner', async () => {
+      const room = await createActiveRoom();
+      const wsWhite = await connectWs(room.id, room.whiteToken);
+      await nextMessage(wsWhite, 'connected');
+      wsWhite.send(JSON.stringify({ type: 'resign' }));
+      await nextMessage(wsWhite, 'game_over');
+      expect(sendPushToPlayer).toHaveBeenCalledWith(room.id, 'black', expect.objectContaining({ title: 'Game over' }));
+      wsWhite.close();
+    });
+
+    test('Accepted draw pushes to the other player', async () => {
+      const room = await createActiveRoom();
+      const wsBlack = await connectWs(room.id, room.blackToken);
+      await nextMessage(wsBlack, 'connected');
+      wsBlack.send(JSON.stringify({ type: 'accept_draw' }));
+      await nextMessage(wsBlack, 'game_over');
+      expect(sendPushToPlayer).toHaveBeenCalledWith(room.id, 'white', expect.objectContaining({ title: 'Game over' }));
+      wsBlack.close();
+    });
+
+    test('Spectator moves send no push', async () => {
+      const room = await createActiveRoom();
+      const spectator = await connectWs(room.id);
+      await nextMessage(spectator, 'connected');
+      spectator.send(JSON.stringify({ type: 'move', from: 'e2', to: 'e4', piece: 'wP' }));
+      await nextMessage(spectator, 'error');
+      expect(sendPushToPlayer).not.toHaveBeenCalled();
+      spectator.close();
+    });
+  });
+
+  describe('Castling', () => {
+    test('Kingside castle move is broadcast and persisted', async () => {
+      const room = await createActiveRoom({ board: kingsAndRooks() });
+      const wsWhite = await connectWs(room.id, room.whiteToken);
+      const wsBlack = await connectWs(room.id, room.blackToken);
       await nextMessage(wsWhite, 'connected');
       await nextMessage(wsBlack, 'connected');
 
-      // Black tries to move on white's turn
-      wsBlack.send(JSON.stringify({
-        type: 'move',
-        from: 'e7',
-        to: 'e5',
-        piece: 'bP',
-      }));
+      wsWhite.send(JSON.stringify({ type: 'move', from: 'e1', to: 'g1', piece: 'wK' }));
 
-      const error = await nextMessage(wsBlack, 'error');
-      expect(error.type).toBe('error');
-      expect(error.message).toContain('not your turn');
+      const whiteMove = await nextMessage(wsWhite, 'move');
+      const blackMove = await nextMessage(wsBlack, 'move');
+      expect(whiteMove.isCastle).toBe('kingside');
+      expect(whiteMove.notation).toBe('O-O');
+      expect(blackMove.isCastle).toBe('kingside');
 
+      const row = await pool.query('SELECT white_king_moved FROM rooms WHERE id = $1', [room.id]);
+      expect(row.rows[0].white_king_moved).toBe(true);
       wsWhite.close();
       wsBlack.close();
+    });
+
+    test('Castling rejected when king has already moved', async () => {
+      const room = await createActiveRoom({ board: kingsAndRooks(), castlingRights: { whiteKingMoved: true } });
+      const wsWhite = await connectWs(room.id, room.whiteToken);
+      await nextMessage(wsWhite, 'connected');
+      wsWhite.send(JSON.stringify({ type: 'move', from: 'e1', to: 'g1', piece: 'wK' }));
+      await nextMessage(wsWhite, 'error');
+
+      const row = await pool.query('SELECT * FROM rooms WHERE id = $1', [room.id]);
+      expect(row.rows[0].current_turn).toBe('white');
+      expect(JSON.parse(row.rows[0].board_state)[7][4]).toBe('wK');
+      wsWhite.close();
     });
   });
 });

@@ -49,8 +49,7 @@ jobs:
           DB_NAME: chessdb_test
           DB_USER: chess
           DB_PASSWORD: chesspass
-          JWT_SECRET: test-secret-key
-        run: npm test -- tests/unit tests/integration --testPathIgnorePatterns=websocket
+        run: npm test -- tests/unit tests/integration
 
       - name: Upload coverage
         uses: codecov/codecov-action@v4
@@ -135,7 +134,6 @@ jobs:
           DB_NAME: chessdb_test
           DB_USER: chess
           DB_PASSWORD: chesspass
-          JWT_SECRET: test-secret-key
         run: cd client && npm run e2e
 
       - name: Upload E2E test results

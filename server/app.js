@@ -9,7 +9,6 @@ const server = http.createServer(app);
 
 app.use(require('cors')({ origin: true, credentials: true }));
 app.use(express.json());
-app.use(require('cookie-parser')());
 
 app.use('/api', routes);
 

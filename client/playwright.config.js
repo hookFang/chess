@@ -26,7 +26,6 @@ module.exports = defineConfig({
       DB_NAME: 'chessdb_test',
       DB_USER: 'chess',
       DB_PASSWORD: 'chesspass',
-      JWT_SECRET: 'test-secret-key',
       PORT: '3001',
     },
   },

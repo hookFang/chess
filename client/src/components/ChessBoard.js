@@ -42,7 +42,7 @@ function getSquareColors(r, c, selected, legalSet, lastMoveSet, isLight) {
   return isLight ? '#DEB887' : '#6B3F20';
 }
 
-export default function ChessBoard({ boardState, currentTurn, myColor, onMove, gameOver, lastMove, inCheck }) {
+export default function ChessBoard({ boardState, currentTurn, myColor, onMove, gameOver, lastMove, inCheck, castlingRights }) {
   injectKeyframes();
 
   const [selected, setSelected] = useState(null);
@@ -95,13 +95,13 @@ export default function ChessBoard({ boardState, currentTurn, myColor, onMove, g
 
     if (piece && clickedColor === myColorChar) {
       setSelected([r, c]);
-      setLegalMoves(getLegalMoves(board, r, c));
+      setLegalMoves(getLegalMoves(board, r, c, castlingRights));
       return;
     }
 
     setSelected(null);
     setLegalMoves([]);
-  }, [board, selected, legalSet, canInteract, myColor, onMove]);
+  }, [board, selected, legalSet, canInteract, myColor, onMove, castlingRights]);
 
   const rows = flipped ? [7,6,5,4,3,2,1,0] : [0,1,2,3,4,5,6,7];
   const cols = flipped ? [7,6,5,4,3,2,1,0] : [0,1,2,3,4,5,6,7];

@@ -30,8 +30,8 @@ cd client && npm start     # proxies /api/* and /ws to localhost:3001
 
 ### Docker
 ```bash
-docker compose up --build  # full stack: postgres + app on port 3001
-docker compose restart app # restart app only (DB state preserved)
+docker build -t chess .    # single self-contained image (server + embedded PostgreSQL)
+docker run -p 8443:443 -v chess-data:/data chess   # https://localhost:8443 (self-signed)
 ```
 
 ### Verify modules load
@@ -101,14 +101,10 @@ Castling rights are stored per room as six `*_moved` booleans (king, and each ro
 
 `server/push.js` (`sendPushToPlayer(roomId, color, payload)`) notifies the opponent after a move and on game over via the `web-push` library. Subscriptions are stored per room + colour (`push_subscriptions`) via `POST /api/rooms/:id/push`. Needs `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY`, `VAPID_SUBJECT`; without them push is silently skipped. The service worker is `client/public/sw.js`. Push requires HTTPS (or localhost).
 
-### Piece animations
+### Docker image
 
-`client/src/utils/pieceIds.js` exports `usePieceIds(boardState)` — a hook that diffs successive board states to assign **stable instance IDs** (e.g. `wP#4`) to each piece. These IDs are passed as `layoutId` to framer-motion `<motion.div>` elements in `ChessBoard.js`, enabling pieces to animate smoothly from square to square rather than teleporting.
-
-### SVG pieces
-
-`client/src/components/ChessPieces.js` renders all six piece types as inline SVGs. It exports `<SvgDefs />` — a hidden SVG containing shared gradient definitions (`kf-w-grad`, `kf-b-grad`, etc.) that must be rendered once at the app root (`App.js`) so all piece instances can reference them by ID.
+One container runs nginx, the server and PostgreSQL. `docker-entrypoint.sh` generates a self-signed cert into `/data/certs` (unless `server.crt`/`server.key` already exist; `TLS_DOMAIN` sets the name), initialises the DB in `/data/postgres`, generates VAPID keys into `/data/config.env` on first start (unless `VAPID_*` env vars are given), then runs the app (unprivileged, `127.0.0.1:3001`) behind nginx (`nginx.conf`, TLS on 443, proxies `/ws` too). Only 443 is exposed. Setting `DB_HOST` skips the embedded DB and uses an external one.
 
 ## Environment variables
 
-See `.env.example`. Defaults work for local dev with a running Postgres instance. The `DB_*` vars default to `localhost/chessdb/chess/chesspass`. The `VAPID_*` vars are only needed for push notifications (generate with `npx web-push generate-vapid-keys`).
+See `.env.example`. Defaults work for local dev with a running Postgres instance. The `DB_*` vars default to `localhost/chessdb/chess/chesspass`. The `VAPID_*` vars are only needed for push notifications when running outside Docker (generate with `npx web-push generate-vapid-keys`); the Docker image generates them on first start.

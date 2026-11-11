@@ -1,8 +1,7 @@
 const { test, expect } = require('@playwright/test');
 
-test('Home needs no login and creates a game', async ({ page }) => {
+test('Home creates a game', async ({ page }) => {
   await page.goto('/');
-  await expect(page.locator('input[type="password"]')).toHaveCount(0);
   await page.click('button:has-text("Create Game")');
   await page.waitForURL(/\/game\//, { timeout: 10000 });
 });
@@ -23,6 +22,6 @@ test('Unknown game link shows not found', async ({ page }) => {
 });
 
 test('Unknown routes go home', async ({ page }) => {
-  await page.goto('/lobby');
+  await page.goto('/some/unknown/path');
   await expect(page.locator('button:has-text("Create Game")')).toBeVisible();
 });

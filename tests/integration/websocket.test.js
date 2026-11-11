@@ -81,7 +81,7 @@ describe('WebSocket API', () => {
   ];
 
   describe('Connection', () => {
-    test('Tokens decide the color; no login is needed', async () => {
+    test('Tokens decide the color', async () => {
       const room = await createActiveRoom();
       const white = await connectWs(room.id, room.whiteToken);
       const black = await connectWs(room.id, room.blackToken);

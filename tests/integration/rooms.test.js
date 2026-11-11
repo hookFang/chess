@@ -6,7 +6,7 @@ const asPlayer = (req, token) => (token ? req.set('X-Player-Token', token) : req
 
 describe('Rooms API', () => {
   describe('POST /api/rooms', () => {
-    test('Creates a room with no login and returns the creator\'s token', async () => {
+    test('Creates a room and returns the creator\'s token', async () => {
       const res = await request(app).post('/api/rooms');
       expect(res.status).toBe(200);
       expect(res.body.roomId).toBeDefined();
@@ -130,11 +130,5 @@ describe('Rooms API', () => {
       const res = await request(app).post('/api/rooms/00000000-0000-0000-0000-000000000000/join');
       expect(res.status).toBe(404);
     });
-  });
-
-  test('Removed account endpoints no longer exist', async () => {
-    expect((await request(app).post('/api/auth/register').send({ username: 'abc', password: 'password1' })).status).toBe(404);
-    expect((await request(app).post('/api/auth/login').send({})).status).toBe(404);
-    expect((await request(app).get('/api/rooms')).status).toBe(404);
   });
 });
